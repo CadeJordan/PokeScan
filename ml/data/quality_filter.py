@@ -22,6 +22,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+ImageSource = Path | bytes
+
 log = logging.getLogger(__name__)
 
 
@@ -47,21 +49,35 @@ def _laplacian_variance(image_bgr: np.ndarray) -> float:
 
 
 def assess_image(
-    path: Path,
+    source: ImageSource,
     *,
     min_long_edge_px: int = MIN_LONG_EDGE_PX,
     min_filesize_bytes: int = MIN_FILESIZE_BYTES,
     min_laplacian_var: float = MIN_LAPLACIAN_VAR,
 ) -> QualityResult:
-    """Inspect a saved image file. Returns a `QualityResult`."""
-    if not path.exists():
-        return QualityResult(ok=False, reason="missing file")
+    """Inspect an image. Accepts either an on-disk Path or raw bytes.
 
-    size = path.stat().st_size
-    if size < min_filesize_bytes:
-        return QualityResult(ok=False, reason=f"file too small ({size}B)")
+    Prefer passing raw bytes when the image is going to be recompressed
+    on save: Laplacian-variance scales with resolution, so measuring
+    blur on the original capture gives a stable threshold across
+    different downsampling targets.
+    """
+    if isinstance(source, (bytes, bytearray)):
+        raw = bytes(source)
+        size = len(raw)
+        if size < min_filesize_bytes:
+            return QualityResult(ok=False, reason=f"file too small ({size}B)")
+        arr = np.frombuffer(raw, dtype=np.uint8)
+        image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    else:
+        path = source
+        if not path.exists():
+            return QualityResult(ok=False, reason="missing file")
+        size = path.stat().st_size
+        if size < min_filesize_bytes:
+            return QualityResult(ok=False, reason=f"file too small ({size}B)")
+        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
 
-    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if image is None or image.size == 0:
         return QualityResult(ok=False, reason="undecodable image")
 

@@ -37,6 +37,7 @@ from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, T
 from backend.app.core.config import get_settings
 from ml.data.db import cert_exists, connect, pokemon_cert_count, upsert_cert
 from ml.data.ebay_client import EBayClient, EBayItemSummary, upscale_ebay_image_url
+from ml.data.image_io import save_compressed_jpeg
 from ml.data.quality_filter import assess_image
 from ml.data.side_classifier import pick_front_back
 
@@ -177,20 +178,20 @@ async def _ingest_item(
         return None, "no clear back side"
     front_idx, back_idx = pick
 
+    # Assess on the raw (full-resolution) bytes so the blur threshold is
+    # stable - Laplacian variance shifts with downsampling. Only persist
+    # the compressed copy if both sides pass.
+    front_q = assess_image(candidate_bytes[front_idx])
+    back_q = assess_image(candidate_bytes[back_idx])
+    if not (front_q.ok and back_q.ok):
+        bad = "front: " + front_q.reason if not front_q.ok else "back: " + back_q.reason
+        return None, f"quality reject ({bad})"
+
     cert_key = f"ebay:{summary.item_id}"
     front_path = images_dir / f"{summary.item_id}_front.jpg"
     back_path = images_dir / f"{summary.item_id}_back.jpg"
-    front_path.parent.mkdir(parents=True, exist_ok=True)
-    front_path.write_bytes(candidate_bytes[front_idx])
-    back_path.write_bytes(candidate_bytes[back_idx])
-
-    front_q = assess_image(front_path)
-    back_q = assess_image(back_path)
-    if not (front_q.ok and back_q.ok):
-        front_path.unlink(missing_ok=True)
-        back_path.unlink(missing_ok=True)
-        bad = "front: " + front_q.reason if not front_q.ok else "back: " + back_q.reason
-        return None, f"quality reject ({bad})"
+    save_compressed_jpeg(candidate_bytes[front_idx], front_path)
+    save_compressed_jpeg(candidate_bytes[back_idx], back_path)
 
     images_root = images_dir.parent
     row = {

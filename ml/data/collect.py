@@ -27,6 +27,7 @@ from rich.progress import (
 
 from backend.app.core.config import get_settings
 from ml.data.db import connect, pokemon_cert_count, upsert_cert
+from ml.data.image_io import save_compressed_jpeg
 from ml.data.psa_client import PSAClient, PSARateLimitError
 
 logging.basicConfig(level=logging.INFO, handlers=[RichHandler(rich_tracebacks=True)])
@@ -77,16 +78,21 @@ async def _process_cert(
 
         front_path = images_dir / f"{details.cert_number}_front.jpg"
         back_path = images_dir / f"{details.cert_number}_back.jpg"
-        got_front = (
-            await psa.download_image(images.front_url, front_path)
-            if images.front_url
-            else False
-        )
-        got_back = (
-            await psa.download_image(images.back_url, back_path)
-            if images.back_url
-            else False
-        )
+
+        got_front = False
+        if images.front_url:
+            raw = await psa.download_image_bytes(images.front_url)
+            if raw is not None:
+                save_compressed_jpeg(raw, front_path)
+                got_front = True
+
+        got_back = False
+        if images.back_url:
+            raw = await psa.download_image_bytes(images.back_url)
+            if raw is not None:
+                save_compressed_jpeg(raw, back_path)
+                got_back = True
+
         if got_front:
             row["front_path"] = str(front_path.relative_to(images_dir.parent))
         if got_back:
@@ -101,18 +107,23 @@ async def _run(
     concurrency: int,
     daily_limit: int,
     abort_after_misses: int,
+    token_index: int | None,
 ) -> None:
     settings = get_settings()
-    if not settings.psa_api_token:
-        raise typer.BadParameter(
-            "PSA_API_TOKEN missing. Put it in .env (see .env.example)."
-        )
+    try:
+        token = settings.get_psa_token(token_index)
+    except (RuntimeError, IndexError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    available = sorted(settings.psa_api_tokens)
+    label = f"PSA_API_TOKEN{token_index}" if token_index is not None else "PSA_API_TOKEN (default)"
+    log.info("using %s (available indices: %s)", label, available or "[]")
 
     sem = asyncio.Semaphore(concurrency)
     # PSAClient is an *async* context manager, while `connect()` returns a
     # sync sqlite context manager. They cannot be combined in a single
     # `async with` line, so we enter them separately.
-    async with PSAClient(settings.psa_api_token, daily_limit=daily_limit) as psa:
+    async with PSAClient(token, daily_limit=daily_limit) as psa:
         with connect(settings.db_path) as conn:
             progress = Progress(
                 TextColumn("[bold blue]{task.description}"),
@@ -217,8 +228,17 @@ def main(
         help="If we hit this many consecutive 404s with zero data, bail out to "
         "preserve quota. Set to 0 to disable.",
     ),
+    token_index: int | None = typer.Option(
+        None,
+        "--token-index",
+        "-t",
+        help="Which PSA_API_TOKEN<N> from .env to use (e.g. 0, 1, 2). "
+        "Omit to use the lowest-indexed token (or legacy PSA_API_TOKEN).",
+    ),
 ) -> None:
-    asyncio.run(_run(start_cert, count, concurrency, daily_limit, abort_after_misses))
+    asyncio.run(
+        _run(start_cert, count, concurrency, daily_limit, abort_after_misses, token_index)
+    )
 
 
 if __name__ == "__main__":

@@ -33,6 +33,11 @@ CREATE INDEX IF NOT EXISTS idx_certs_grade ON certs(grade_int);
 CREATE INDEX IF NOT EXISTS idx_certs_pokemon ON certs(is_pokemon);
 CREATE INDEX IF NOT EXISTS idx_certs_split ON certs(split);
 CREATE INDEX IF NOT EXISTS idx_certs_has_images ON certs(has_images);
+"""
+
+# Indexes that depend on columns added by `_migrate`. Created after migration
+# so they don't blow up against a pre-existing table missing those columns.
+POST_MIGRATION_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_certs_source ON certs(source);
 """
 
@@ -42,7 +47,6 @@ def _migrate(conn) -> None:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(certs)").fetchall()}
     if "source" not in cols:
         conn.execute("ALTER TABLE certs ADD COLUMN source TEXT NOT NULL DEFAULT 'psa'")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_certs_source ON certs(source)")
 
 
 @contextmanager
@@ -53,6 +57,7 @@ def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
     try:
         conn.executescript(SCHEMA)
         _migrate(conn)
+        conn.executescript(POST_MIGRATION_INDEXES)
         yield conn
         conn.commit()
     finally:

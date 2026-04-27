@@ -186,7 +186,9 @@ class PSAClient:
         grade_label = cert.get("CardGrade") or cert.get("Grade") or ""
         return PSACertDetails(
             cert_number=str(cert.get("CertNumber") or cert_number),
-            brand_title=str(cert.get("BrandTitle") or ""),
+            # PSA's payload uses `Brand` for some categories and `BrandTitle`
+            # for others - check both so we don't lose the most useful field.
+            brand_title=str(cert.get("BrandTitle") or cert.get("Brand") or ""),
             subject=str(cert.get("Subject") or ""),
             year=str(cert.get("Year") or "") or None,
             card_number=str(cert.get("CardNumber") or "") or None,
@@ -212,16 +214,32 @@ class PSAClient:
                 back = url
         return PSACertImages(str(cert_number), front, back)
 
-    async def download_image(self, url: str, dest: Path) -> bool:
-        """Download an image URL to disk. Returns True on success.
+    async def download_image_bytes(self, url: str) -> bytes | None:
+        """Download an image URL into memory. Returns None on failure.
 
-        Image URLs are CDN, not the API, so they don't count toward the daily quota.
+        Image URLs are CDN, not the API, so they don't count toward the
+        daily quota.
         """
-        dest.parent.mkdir(parents=True, exist_ok=True)
         async with httpx.AsyncClient(timeout=60.0) as cdn:
-            resp = await cdn.get(url)
-            if resp.status_code != 200:
-                log.warning("image download %s -> %s", url, resp.status_code)
-                return False
-            dest.write_bytes(resp.content)
-            return True
+            try:
+                resp = await cdn.get(url)
+            except httpx.HTTPError as exc:
+                log.warning("image download %s failed: %s", url, exc)
+                return None
+        if resp.status_code != 200:
+            log.warning("image download %s -> %s", url, resp.status_code)
+            return None
+        return resp.content
+
+    async def download_image(self, url: str, dest: Path) -> bool:
+        """Download an image URL straight to disk (uncompressed).
+
+        Prefer ``download_image_bytes`` + ``image_io.save_compressed_jpeg``
+        for ingest, which downsamples + recompresses to manageable sizes.
+        """
+        data = await self.download_image_bytes(url)
+        if data is None:
+            return False
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        return True
