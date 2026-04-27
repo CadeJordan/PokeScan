@@ -11,7 +11,12 @@ type Props = {
 
 const ALLOWED = new Set(["image/jpeg", "image/png", "image/webp"]);
 
-const ImageDropzone = ({ label, file, onFileChange, accept = "image/*" }: Props) => {
+const ImageDropzone = ({
+  label,
+  file,
+  onFileChange,
+  accept = "image/*",
+}: Props) => {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -27,7 +32,7 @@ const ImageDropzone = ({ label, file, onFileChange, accept = "image/*" }: Props)
     return () => URL.revokeObjectURL(url);
   }, [file]);
 
-  const accept_file = useCallback(
+  const acceptFile = useCallback(
     (f: File | undefined | null) => {
       setError(null);
       if (!f) return;
@@ -46,7 +51,15 @@ const ImageDropzone = ({ label, file, onFileChange, accept = "image/*" }: Props)
 
   return (
     <div className="flex flex-col gap-2">
-      <span className="text-sm font-medium text-slate-700">{label}</span>
+      <div className="flex items-baseline justify-between">
+        <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-400">
+          {label}
+        </span>
+        <span className="font-mono text-[10px] tracking-wider text-zinc-600">
+          5 : 7 · jpg/png/webp
+        </span>
+      </div>
+
       <div
         onClick={() => inputRef.current?.click()}
         onDragOver={(e) => {
@@ -57,51 +70,100 @@ const ImageDropzone = ({ label, file, onFileChange, accept = "image/*" }: Props)
         onDrop={(e) => {
           e.preventDefault();
           setIsDragging(false);
-          accept_file(e.dataTransfer.files?.[0]);
+          acceptFile(e.dataTransfer.files?.[0]);
         }}
-        className={`relative flex aspect-[5/7] cursor-pointer items-center justify-center overflow-hidden rounded-xl border-2 border-dashed transition ${
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            inputRef.current?.click();
+          }
+        }}
+        className={`group relative flex aspect-[5/7] cursor-pointer items-center justify-center overflow-hidden rounded-lg border bg-white/[0.02] transition-colors ${
           isDragging
-            ? "border-indigo-400 bg-indigo-50"
+            ? "border-zinc-300 bg-white/[0.04]"
             : preview
-              ? "border-slate-300 bg-slate-50"
-              : "border-slate-300 bg-white hover:border-indigo-400 hover:bg-indigo-50/40"
+              ? "border-white/[0.10]"
+              : "border-dashed border-white/[0.10] hover:border-white/25 hover:bg-white/[0.04]"
         }`}
       >
+        <CornerMarks />
+
         {preview ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={preview}
-            alt={`${label} preview`}
-            className="h-full w-full object-contain"
-          />
+          <>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={preview}
+              alt={`${label} preview`}
+              className="relative h-full w-full object-contain"
+            />
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onFileChange(null);
+              }}
+              className="absolute right-2 top-2 z-10 rounded-md border border-white/[0.10] bg-zinc-950/80 px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-zinc-300 backdrop-blur transition hover:border-white/20 hover:text-zinc-100"
+            >
+              Remove
+            </button>
+          </>
         ) : (
-          <div className="flex flex-col items-center gap-1 px-4 text-center text-sm text-slate-500">
-            <span className="font-medium text-slate-700">Drop image here</span>
-            <span className="text-xs">or click to upload / use camera</span>
+          <div className="relative flex flex-col items-center gap-2 px-6 text-center">
+            <UploadIcon />
+            <span className="text-sm font-medium text-zinc-200">
+              Drop {label.toLowerCase()} photo
+            </span>
+            <span className="text-xs text-zinc-500">
+              or click to upload / use camera
+            </span>
           </div>
         )}
+
         <input
           ref={inputRef}
           type="file"
           accept={accept}
           capture="environment"
           className="hidden"
-          onChange={(e) => accept_file(e.target.files?.[0])}
+          onChange={(e) => acceptFile(e.target.files?.[0])}
         />
       </div>
-      {error ? (
-        <span className="text-xs text-rose-600">{error}</span>
-      ) : file ? (
-        <button
-          type="button"
-          onClick={() => onFileChange(null)}
-          className="self-start text-xs text-slate-500 underline-offset-2 hover:underline"
-        >
-          remove
-        </button>
-      ) : null}
+
+      {error && <span className="font-mono text-[11px] text-rose-300">{error}</span>}
     </div>
   );
 };
+
+const CornerMarks = () => {
+  // Thin L-shaped registration marks at each interior corner.
+  const base = "absolute h-3.5 w-3.5 border-white/30";
+  return (
+    <>
+      <span aria-hidden className={`${base} left-2.5 top-2.5 border-l border-t`} />
+      <span aria-hidden className={`${base} right-2.5 top-2.5 border-r border-t`} />
+      <span aria-hidden className={`${base} bottom-2.5 left-2.5 border-l border-b`} />
+      <span aria-hidden className={`${base} bottom-2.5 right-2.5 border-r border-b`} />
+    </>
+  );
+};
+
+const UploadIcon = () => (
+  <svg
+    viewBox="0 0 24 24"
+    className="h-7 w-7 text-zinc-400 transition-colors group-hover:text-zinc-200"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.5"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden
+  >
+    <path d="M12 16V4" />
+    <path d="M7 9l5-5 5 5" />
+    <path d="M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2" />
+  </svg>
+);
 
 export default ImageDropzone;
