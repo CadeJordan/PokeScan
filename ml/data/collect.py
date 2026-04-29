@@ -28,7 +28,7 @@ from rich.progress import (
 from backend.app.core.config import get_settings
 from ml.data.db import connect, pokemon_cert_count, upsert_cert
 from ml.data.image_io import save_compressed_jpeg
-from ml.data.psa_client import PSAClient, PSARateLimitError
+from ml.data.psa_client import PSAClient, PSAQuotaExhaustedError, PSARateLimitError
 
 logging.basicConfig(level=logging.INFO, handlers=[RichHandler(rich_tracebacks=True)])
 # httpx logs every request at INFO; with hundreds of 404s in a row that's
@@ -149,7 +149,7 @@ async def _run(
                             inflight.remove(t)
                             try:
                                 row = t.result()
-                            except PSARateLimitError:
+                            except (PSARateLimitError, PSAQuotaExhaustedError):
                                 quota_exhausted = True
                                 continue
                             except Exception as exc:  # noqa: BLE001

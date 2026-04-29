@@ -48,7 +48,7 @@ def _build_transforms(image_h: int, image_w: int, train: bool) -> A.Compose:
         return A.Compose(
             [
                 A.LongestMaxSize(max_size=max(image_h, image_w)),
-                A.PadIfNeeded(image_h, image_w, border_mode=cv2.BORDER_CONSTANT, value=0),
+                A.PadIfNeeded(image_h, image_w, border_mode=cv2.BORDER_CONSTANT, fill=0),
                 A.Affine(
                     rotate=(-3, 3),
                     translate_percent={"x": (-0.02, 0.02), "y": (-0.02, 0.02)},
@@ -63,7 +63,7 @@ def _build_transforms(image_h: int, image_w: int, train: bool) -> A.Compose:
     return A.Compose(
         [
             A.LongestMaxSize(max_size=max(image_h, image_w)),
-            A.PadIfNeeded(image_h, image_w, border_mode=cv2.BORDER_CONSTANT, value=0),
+            A.PadIfNeeded(image_h, image_w, border_mode=cv2.BORDER_CONSTANT, fill=0),
             A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
             ToTensorV2(),
         ]

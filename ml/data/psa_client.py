@@ -35,6 +35,17 @@ class PSAAPIError(RuntimeError):
 
 
 class PSARateLimitError(PSAAPIError):
+    """Transient 429 - safe to retry after a short backoff."""
+    pass
+
+
+class PSAQuotaExhaustedError(PSAAPIError):
+    """PSA's daily quota is gone (Retry-After is hours away).
+
+    Distinct from the transient class so tenacity does NOT retry it -
+    further attempts would either burn local time or get further
+    rate-limited. The runner should treat this as a stop signal.
+    """
     pass
 
 
@@ -116,6 +127,10 @@ class PSAClient:
         self._calls_today = 0
         self._counter_day = datetime.now(tz=UTC).date()
         self._lock = asyncio.Lock()
+        # Once PSA tells us the upstream quota is gone (long Retry-After),
+        # latch this so subsequent in-flight tasks fast-fail instead of
+        # each separately hitting 429.
+        self._upstream_quota_exhausted = False
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             headers={"Authorization": f"bearer {token}"},
@@ -149,6 +164,8 @@ class PSAClient:
             self._calls_today += 1
 
     async def _get_json(self, path: str) -> Any:
+        if self._upstream_quota_exhausted:
+            raise PSAQuotaExhaustedError("upstream quota already known exhausted")
         await self._bump_quota()
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(5),
@@ -161,6 +178,20 @@ class PSAClient:
                 resp = await self._client.get(path)
                 if resp.status_code == 429:
                     retry_after = float(resp.headers.get("Retry-After", "5"))
+                    # A multi-minute Retry-After means PSA's daily quota
+                    # for this token is gone. Bail without sleeping; the
+                    # runner will catch this and abort the token cleanly.
+                    if retry_after > 60:
+                        if not self._upstream_quota_exhausted:
+                            log.error(
+                                "PSA quota exhausted (Retry-After=%.0fs); "
+                                "fast-failing remaining in-flight requests",
+                                retry_after,
+                            )
+                            self._upstream_quota_exhausted = True
+                        raise PSAQuotaExhaustedError(
+                            f"daily quota exhausted (retry-after={retry_after:.0f}s)"
+                        )
                     log.warning("PSA 429 - sleeping %.1fs", retry_after)
                     await asyncio.sleep(retry_after)
                     raise PSARateLimitError("429 from upstream")

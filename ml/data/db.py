@@ -50,10 +50,15 @@ def _migrate(conn) -> None:
 
 
 @contextmanager
-def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
+def connect(db_path: Path, busy_timeout_ms: int = 5_000) -> Iterator[sqlite3.Connection]:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    # `timeout` lets sqlite3 wait out transient locks (e.g. another process
+    # finishing a write) instead of failing immediately; combined with the
+    # PRAGMA below this also helps recover hot rollback journals left by
+    # an earlier crash.
+    conn = sqlite3.connect(str(db_path), timeout=busy_timeout_ms / 1000)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
     try:
         conn.executescript(SCHEMA)
         _migrate(conn)
