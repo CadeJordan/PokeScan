@@ -1,0 +1,89 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap");
+@import "tailwindcss";
+
+:root {
+	--background: #08090a;
+	--foreground: #ededee;
+
+	--font-sans: var(--font-geist-sans), Inter, system-ui, sans-serif;
+	--font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+@theme inline {
+	--color-background: var(--background);
+	--color-foreground: var(--foreground);
+	--font-sans: var(--font-sans);
+	--font-mono: var(--font-mono);
+
+	/* Legacy tokens kept for any existing usage */
+	--color-scott-grey-100: #424242;
+	--color-scott-grey-200: #d9d9d9;
+	--color-scott-grey-300: #adadad;
+	--color-scott-red-100: #d4183d;
+
+	--font-agsm-main: "Inter", serif;
+}
+
+html,
+body {
+	min-height: 100%;
+}
+
+body {
+	background: var(--background);
+	color: var(--foreground);
+	font-family: var(--font-sans);
+	-webkit-font-smoothing: antialiased;
+	font-feature-settings: "ss01", "cv11";
+}
+
+/* Selection looks better on near-black with a low-saturation tint. */
+::selection {
+	background: rgba(245, 158, 11, 0.25);
+	color: #fff;
+}
+
+/* Subtle entrance for the grade panel - the only animation we keep. */
+@keyframes grade-rise {
+	from {
+		opacity: 0;
+		transform: translateY(6px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+.animate-grade-rise {
+	animation: grade-rise 360ms cubic-bezier(0.21, 1, 0.32, 1) both;
+}
+
+/* Status indicator pulse (used only when model is ready). */
+@keyframes status-pulse {
+	0%,
+	100% {
+		box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.5);
+	}
+	50% {
+		box-shadow: 0 0 0 5px rgba(52, 211, 153, 0);
+	}
+}
+.animate-status-pulse {
+	animation: status-pulse 2.4s ease-out infinite;
+}
+
+/* Scrollbar polish for dark surfaces. */
+::-webkit-scrollbar {
+	width: 10px;
+	height: 10px;
+}
+::-webkit-scrollbar-thumb {
+	background: rgba(82, 82, 91, 0.45);
+	border-radius: 0;
+}
+::-webkit-scrollbar-thumb:hover {
+	background: rgba(82, 82, 91, 0.75);
+}
+::-webkit-scrollbar-track {
+	background: transparent;
+}

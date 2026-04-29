@@ -1,0 +1,20 @@
+backbone: convnext_tiny
+pretrained: true
+dropout: 0.2
+front_weight: 0.7
+
+lr: 3.0e-4
+weight_decay: 0.05
+aux_mse_weight: 0.1
+
+batch_size: 16
+num_workers: 4
+image_h: 840
+image_w: 600
+balanced_sampler: true
+
+max_epochs: 30
+precision: 16-mixed
+gradient_clip_val: 1.0
+early_stop_patience: 6
+seed: 42
