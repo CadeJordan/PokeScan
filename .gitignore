@@ -10,6 +10,7 @@ __pycache__/
 .env.local
 
 data/images/
+data/crops/
 data/models/
 data/*.sqlite
 data/*.sqlite-*
