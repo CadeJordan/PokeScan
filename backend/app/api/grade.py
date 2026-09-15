@@ -24,16 +24,23 @@ class CenteringSubGrade(BaseModel):
     top_bottom: str | None = None
 
 
-class SubGrades(BaseModel):
-    """Reserved slots for per-factor breakdown.
+class FactorSubGrade(BaseModel):
+    grade: float | None = None
+    hint: str | None = None
+    flags: list[str] = Field(default_factory=list)
 
-    Phase B fills `centering`. Phase C fills `corners`, `edges`, `surface`.
+
+class SubGrades(BaseModel):
+    """Per-factor breakdown.
+
+    `centering` is classical-CV geometry. `corners`, `edges`, `surface` are the
+    classical-CV condition analysis (whitening, wear, cut, scratches/creases).
     """
 
     centering: CenteringSubGrade | None = None
-    corners: float | None = None
-    edges: float | None = None
-    surface: float | None = None
+    corners: FactorSubGrade | None = None
+    edges: FactorSubGrade | None = None
+    surface: FactorSubGrade | None = None
 
 
 class GradeResponse(BaseModel):
@@ -93,6 +100,25 @@ async def grade_card(
         sub.centering = compute_centering_subgrade(front_bytes)
     except Exception as exc:  # noqa: BLE001
         log.debug("centering subgrade unavailable: %s", exc)
+
+    try:
+        from backend.app.ml.condition import compute_condition_subgrades
+
+        cond = compute_condition_subgrades(front_bytes, back_bytes)
+        for name in ("corners", "edges", "surface"):
+            factor = getattr(cond, name)
+            setattr(
+                sub,
+                name,
+                FactorSubGrade(
+                    grade=round(factor.grade, 1),
+                    hint=factor.hint,
+                    flags=factor.flags,
+                ),
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.debug("condition subgrades unavailable: %s", exc)
+        notes.append("corner/edge/surface analysis unavailable for these images")
 
     return GradeResponse(
         grade=round(pred.grade, 2),

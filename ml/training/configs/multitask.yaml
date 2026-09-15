@@ -1,0 +1,28 @@
+# Multi-task grade model: CORN overall grade + corners/edges/surface heads.
+# Factor labels come from classical CV (run `python -m ml.data.precompute_factors` first).
+
+multitask: true
+grade_weight: 0.6
+factor_weight: 0.133333   # 0.4 / 3
+
+backbone: convnext_tiny
+pretrained: true
+dropout: 0.2
+front_weight: 0.7
+
+lr: 3.0e-4
+weight_decay: 0.05
+
+batch_size: 4
+num_workers: 2
+image_h: 840
+image_w: 600
+balanced_sampler: true
+use_precrop: true
+crop_card: false
+
+max_epochs: 30
+precision: 16-mixed
+gradient_clip_val: 1.0
+early_stop_patience: 6
+seed: 42

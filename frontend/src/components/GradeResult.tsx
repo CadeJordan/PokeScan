@@ -75,9 +75,21 @@ const GradeResult = ({ result }: Props) => {
                 : undefined
             }
           />
-          <SubGradeCell label="Corners" value={sub_grades.corners} pending />
-          <SubGradeCell label="Edges" value={sub_grades.edges} pending />
-          <SubGradeCell label="Surface" value={sub_grades.surface} pending />
+          <SubGradeCell
+            label="Corners"
+            value={sub_grades.corners?.grade ?? null}
+            hint={sub_grades.corners?.hint ?? undefined}
+          />
+          <SubGradeCell
+            label="Edges"
+            value={sub_grades.edges?.grade ?? null}
+            hint={sub_grades.edges?.hint ?? undefined}
+          />
+          <SubGradeCell
+            label="Surface"
+            value={sub_grades.surface?.grade ?? null}
+            hint={sub_grades.surface?.hint ?? undefined}
+          />
         </div>
       </div>
 
@@ -188,12 +200,10 @@ const SubGradeCell = ({
   label,
   value,
   hint,
-  pending = false,
 }: {
   label: string;
   value: number | null;
   hint?: string;
-  pending?: boolean;
 }) => {
   const has = value !== null && value !== undefined;
   return (
@@ -210,11 +220,6 @@ const SubGradeCell = ({
       </span>
       {hint && (
         <span className="font-mono text-[10px] text-zinc-500">{hint}</span>
-      )}
-      {pending && !has && (
-        <span className="font-mono text-[10px] tracking-wider text-zinc-600">
-          phase c
-        </span>
       )}
     </div>
   );

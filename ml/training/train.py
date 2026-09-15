@@ -19,7 +19,7 @@ from rich.logging import RichHandler
 
 from backend.app.core.config import get_settings
 from ml.data.dataset import PSACardDataModule
-from ml.training.lightning_module import GradeLightningModule
+from ml.training.lightning_module import GradeLightningModule, MultiTaskGradeLightningModule
 
 logging.basicConfig(level=logging.INFO, handlers=[RichHandler(rich_tracebacks=True)])
 log = logging.getLogger("train")
@@ -53,18 +53,35 @@ def main(
         image_h=cfg["image_h"],
         image_w=cfg["image_w"],
         balanced=cfg.get("balanced_sampler", True),
+        crop_card=cfg.get("crop_card", False),
+        use_precrop=cfg.get("use_precrop", True),
     )
 
-    module = GradeLightningModule(
-        backbone=cfg["backbone"],
-        pretrained=cfg["pretrained"],
-        dropout=cfg["dropout"],
-        front_weight=cfg["front_weight"],
-        lr=cfg["lr"],
-        weight_decay=cfg["weight_decay"],
-        max_epochs=cfg["max_epochs"],
-        aux_mse_weight=cfg["aux_mse_weight"],
-    )
+    module: GradeLightningModule | MultiTaskGradeLightningModule
+    if cfg.get("multitask", False):
+        module = MultiTaskGradeLightningModule(
+            backbone=cfg["backbone"],
+            pretrained=cfg["pretrained"],
+            dropout=cfg["dropout"],
+            front_weight=cfg["front_weight"],
+            lr=cfg["lr"],
+            weight_decay=cfg["weight_decay"],
+            max_epochs=cfg["max_epochs"],
+            grade_weight=cfg.get("grade_weight", 0.6),
+            factor_weight=cfg.get("factor_weight", 0.4 / 3.0),
+        )
+        log.info("multitask mode: grade + corners/edges/surface pseudo-label heads")
+    else:
+        module = GradeLightningModule(
+            backbone=cfg["backbone"],
+            pretrained=cfg["pretrained"],
+            dropout=cfg["dropout"],
+            front_weight=cfg["front_weight"],
+            lr=cfg["lr"],
+            weight_decay=cfg["weight_decay"],
+            max_epochs=cfg["max_epochs"],
+            aux_mse_weight=cfg["aux_mse_weight"],
+        )
 
     ckpt_dir = settings.models_dir / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)

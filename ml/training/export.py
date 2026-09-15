@@ -22,7 +22,7 @@ from backend.app.core.config import get_settings
 from backend.app.ml.model import GradeModel, NUM_THRESHOLDS
 from ml.data.dataset import PSACardDataModule
 from ml.training.calibrate import fit_temperature
-from ml.training.lightning_module import GradeLightningModule
+from ml.training.lightning_module import GradeLightningModule, MultiTaskGradeLightningModule
 
 logging.basicConfig(level=logging.INFO, handlers=[RichHandler(rich_tracebacks=True)])
 log = logging.getLogger("export")
@@ -61,8 +61,15 @@ def main(
 ) -> None:
     settings = get_settings()
     log.info("loading checkpoint: %s", checkpoint)
-    lit = GradeLightningModule.load_from_checkpoint(str(checkpoint), map_location="cpu")
-    model: GradeModel = lit.model.eval()
+    ckpt_meta = torch.load(str(checkpoint), map_location="cpu", weights_only=False)
+    hparams = ckpt_meta.get("hyper_parameters") or {}
+    if "grade_weight" in hparams:
+        lit = MultiTaskGradeLightningModule.load_from_checkpoint(str(checkpoint), map_location="cpu")
+        model: GradeModel = lit.model.base.eval()
+        log.info("loaded multitask checkpoint (exporting grade backbone only)")
+    else:
+        lit = GradeLightningModule.load_from_checkpoint(str(checkpoint), map_location="cpu")
+        model = lit.model.eval()
 
     if skip_calibration:
         T = 1.0
@@ -70,7 +77,8 @@ def main(
     else:
         log.info("fitting temperature on validation split")
         dm = PSACardDataModule(
-            batch_size=batch_size, num_workers=0, image_h=image_h, image_w=image_w, balanced=False
+            batch_size=batch_size, num_workers=0, image_h=image_h, image_w=image_w,
+            balanced=False, crop_card=False, use_precrop=True,
         )
         cal = fit_temperature(model, dm.val_loader(), device="cpu")
         T = cal.temperature

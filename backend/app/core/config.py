@@ -36,6 +36,7 @@ class Settings(BaseSettings):
 
     data_dir: Path = PROJECT_ROOT / "data"
     images_dir: Path = PROJECT_ROOT / "data" / "images"
+    crops_dir: Path = PROJECT_ROOT / "data" / "crops"
     db_path: Path = PROJECT_ROOT / "data" / "pokescan.sqlite"
     models_dir: Path = PROJECT_ROOT / "data" / "models"
     active_model_path: Path = PROJECT_ROOT / "data" / "models" / "grade_model.onnx"
@@ -100,7 +101,7 @@ class Settings(BaseSettings):
         )
 
     def ensure_dirs(self) -> None:
-        for p in (self.data_dir, self.images_dir, self.models_dir):
+        for p in (self.data_dir, self.images_dir, self.crops_dir, self.models_dir):
             p.mkdir(parents=True, exist_ok=True)
 
 

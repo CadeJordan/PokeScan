@@ -42,11 +42,33 @@ CREATE INDEX IF NOT EXISTS idx_certs_source ON certs(source);
 """
 
 
+_FACTOR_COLUMNS = (
+    "corners_subgrade",
+    "edges_subgrade",
+    "surface_subgrade",
+    "factors_computed_at",
+)
+
+_PRECROP_COLUMNS = (
+    "cropped_front_path",
+    "cropped_back_path",
+    "precrop_at",
+)
+
+
 def _migrate(conn) -> None:
     """Best-effort additive migration for pre-existing DBs."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(certs)").fetchall()}
     if "source" not in cols:
         conn.execute("ALTER TABLE certs ADD COLUMN source TEXT NOT NULL DEFAULT 'psa'")
+    for col in _FACTOR_COLUMNS:
+        if col not in cols:
+            col_type = "REAL" if col.endswith("_subgrade") else "TEXT"
+            conn.execute(f"ALTER TABLE certs ADD COLUMN {col} {col_type}")
+    for col in _PRECROP_COLUMNS:
+        if col not in cols:
+            col_type = "TEXT"
+            conn.execute(f"ALTER TABLE certs ADD COLUMN {col} {col_type}")
 
 
 @contextmanager
@@ -94,6 +116,68 @@ def pokemon_cert_count(conn: sqlite3.Connection, with_images_only: bool = True) 
     if with_images_only:
         sql += " AND has_images=1"
     return int(conn.execute(sql).fetchone()[0])
+
+
+def update_factor_subgrades(
+    conn: sqlite3.Connection,
+    cert_number: str,
+    *,
+    corners: float,
+    edges: float,
+    surface: float,
+) -> None:
+    conn.execute(
+        "UPDATE certs SET corners_subgrade=?, edges_subgrade=?, surface_subgrade=?, "
+        "factors_computed_at=datetime('now') WHERE cert_number=?",
+        (corners, edges, surface, cert_number),
+    )
+
+
+def factor_label_coverage(conn: sqlite3.Connection) -> dict[str, int]:
+    """Return counts of pokemon certs with/without precomputed factor labels."""
+    total = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM certs WHERE is_pokemon=1 AND has_images=1 "
+            "AND front_path IS NOT NULL AND back_path IS NOT NULL"
+        ).fetchone()[0]
+    )
+    labeled = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM certs WHERE is_pokemon=1 AND has_images=1 "
+            "AND corners_subgrade IS NOT NULL"
+        ).fetchone()[0]
+    )
+    return {"total": total, "labeled": labeled, "missing": total - labeled}
+
+
+def update_precrop_paths(
+    conn: sqlite3.Connection,
+    cert_number: str,
+    *,
+    cropped_front_path: str,
+    cropped_back_path: str,
+) -> None:
+    conn.execute(
+        "UPDATE certs SET cropped_front_path=?, cropped_back_path=?, "
+        "precrop_at=datetime('now') WHERE cert_number=?",
+        (cropped_front_path, cropped_back_path, cert_number),
+    )
+
+
+def precrop_coverage(conn: sqlite3.Connection) -> dict[str, int]:
+    total = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM certs WHERE is_pokemon=1 AND has_images=1 "
+            "AND front_path IS NOT NULL AND back_path IS NOT NULL"
+        ).fetchone()[0]
+    )
+    done = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM certs WHERE is_pokemon=1 AND has_images=1 "
+            "AND cropped_front_path IS NOT NULL"
+        ).fetchone()[0]
+    )
+    return {"total": total, "precropped": done, "missing": total - done}
 
 
 def grade_distribution(conn: sqlite3.Connection) -> dict[int, int]:

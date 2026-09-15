@@ -32,6 +32,13 @@ CARD_H = 840
 class CardCrop:
     image: np.ndarray  # (CARD_H, CARD_W, 3) uint8 RGB
     found_quad: bool
+    # Original-image artifacts, populated only when a card quad was detected.
+    # `quad` is the 4-point card outline (tl, tr, br, bl) in source pixels;
+    # `contour` is the full external contour (pre-approxPolyDP) for fidelity in
+    # corner/edge geometry analysis; `source_bgr` is the decoded source image.
+    quad: np.ndarray | None = None
+    contour: np.ndarray | None = None
+    source_bgr: np.ndarray | None = None
 
 
 def _order_quad(pts: np.ndarray) -> np.ndarray:
@@ -50,7 +57,12 @@ def _order_quad(pts: np.ndarray) -> np.ndarray:
     )
 
 
-def _find_card_quad(bgr: np.ndarray) -> np.ndarray | None:
+def _find_card_quad(bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    """Find the card outline.
+
+    Returns `(quad, contour)` where `quad` is the ordered 4-point outline and
+    `contour` is the full external contour (Nx1x2) that produced it, or None.
+    """
     h, w = bgr.shape[:2]
     img_area = h * w
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
@@ -81,7 +93,7 @@ def _find_card_quad(bgr: np.ndarray) -> np.ndarray | None:
                 continue
             ar = quad_w / quad_h
             if 0.50 <= ar <= 0.85:
-                return quad
+                return quad, c
     return None
 
 
@@ -122,15 +134,22 @@ def detect_and_crop(image: np.ndarray | bytes | Image.Image) -> CardCrop:
         # We assume incoming numpy arrays are RGB unless they're flagged otherwise.
         bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
-    quad = _find_card_quad(bgr)
-    if quad is not None:
+    found = _find_card_quad(bgr)
+    if found is not None:
+        quad, contour = found
         warped = _warp_to_canvas(bgr, quad)
         rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
-        return CardCrop(image=rgb, found_quad=True)
+        return CardCrop(
+            image=rgb,
+            found_quad=True,
+            quad=quad,
+            contour=contour,
+            source_bgr=bgr,
+        )
 
     fallback = _resize_pad(bgr)
     rgb = cv2.cvtColor(fallback, cv2.COLOR_BGR2RGB)
-    return CardCrop(image=rgb, found_quad=False)
+    return CardCrop(image=rgb, found_quad=False, source_bgr=bgr)
 
 
 def encode_jpeg(rgb: np.ndarray, quality: int = 92) -> bytes:

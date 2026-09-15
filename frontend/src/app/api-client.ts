@@ -7,11 +7,17 @@ export type CenteringSubGrade = {
   top_bottom: string | null;
 };
 
+export type FactorSubGrade = {
+  grade: number | null;
+  hint: string | null;
+  flags: string[];
+};
+
 export type SubGrades = {
   centering: CenteringSubGrade | null;
-  corners: number | null;
-  edges: number | null;
-  surface: number | null;
+  corners: FactorSubGrade | null;
+  edges: FactorSubGrade | null;
+  surface: FactorSubGrade | null;
 };
 
 export type GradeResponse = {

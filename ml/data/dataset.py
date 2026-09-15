@@ -34,6 +34,9 @@ class CardRecord:
     front_path: Path
     back_path: Path
     grade: int
+    corners: float | None = None
+    edges: float | None = None
+    surface: float | None = None
 
 
 def _build_transforms(image_h: int, image_w: int, train: bool) -> A.Compose:
@@ -84,8 +87,10 @@ class PSACardDataset(Dataset):
         image_h: int = DEFAULT_H,
         image_w: int = DEFAULT_W,
         train: bool = False,
+        crop_card: bool = False,
     ) -> None:
         self.records = records
+        self.crop_card = crop_card
         self.transform = _build_transforms(image_h, image_w, train)
 
     def __len__(self) -> int:
@@ -95,6 +100,11 @@ class PSACardDataset(Dataset):
         rec = self.records[idx]
         front = _load_image(rec.front_path)
         back = _load_image(rec.back_path)
+        if self.crop_card:
+            from backend.app.ml.preprocess import detect_and_crop
+
+            front = detect_and_crop(front).image
+            back = detect_and_crop(back).image
         front_t = self.transform(image=front)["image"]
         back_t = self.transform(image=back)["image"]
         return {
@@ -102,24 +112,43 @@ class PSACardDataset(Dataset):
             "back": back_t,
             "grade": torch.tensor(rec.grade, dtype=torch.long),
             "cert": rec.cert_number,
+            "corners": torch.tensor(
+                rec.corners if rec.corners is not None else float("nan"), dtype=torch.float32
+            ),
+            "edges": torch.tensor(
+                rec.edges if rec.edges is not None else float("nan"), dtype=torch.float32
+            ),
+            "surface": torch.tensor(
+                rec.surface if rec.surface is not None else float("nan"), dtype=torch.float32
+            ),
         }
 
 
-def load_records(split: str) -> list[CardRecord]:
+def load_records(split: str, *, use_precrop: bool = True) -> list[CardRecord]:
     settings = get_settings()
-    images_root = settings.images_dir.parent  # data/
+    data_root = settings.data_dir
     out: list[CardRecord] = []
     with connect(settings.db_path) as conn:
         rows = conn.execute(
-            "SELECT cert_number, grade_int, front_path, back_path FROM certs "
+            "SELECT cert_number, grade_int, front_path, back_path, "
+            "cropped_front_path, cropped_back_path, "
+            "corners_subgrade, edges_subgrade, surface_subgrade FROM certs "
             "WHERE is_pokemon=1 AND has_images=1 AND grade_int IS NOT NULL "
             "  AND front_path IS NOT NULL AND back_path IS NOT NULL "
             "  AND split=?",
             (split,),
         ).fetchall()
     for r in rows:
-        front = images_root / r["front_path"]
-        back = images_root / r["back_path"]
+        front_rel = r["front_path"]
+        back_rel = r["back_path"]
+        if use_precrop and r["cropped_front_path"] and r["cropped_back_path"]:
+            cf = data_root / r["cropped_front_path"]
+            cb = data_root / r["cropped_back_path"]
+            if cf.exists() and cb.exists():
+                front_rel = r["cropped_front_path"]
+                back_rel = r["cropped_back_path"]
+        front = data_root / front_rel
+        back = data_root / back_rel
         if not (front.exists() and back.exists()):
             continue
         out.append(
@@ -128,6 +157,9 @@ def load_records(split: str) -> list[CardRecord]:
                 front_path=front,
                 back_path=back,
                 grade=int(r["grade_int"]),
+                corners=float(r["corners_subgrade"]) if r["corners_subgrade"] is not None else None,
+                edges=float(r["edges_subgrade"]) if r["edges_subgrade"] is not None else None,
+                surface=float(r["surface_subgrade"]) if r["surface_subgrade"] is not None else None,
             )
         )
     return out
@@ -154,16 +186,22 @@ class PSACardDataModule:
         image_h: int = DEFAULT_H,
         image_w: int = DEFAULT_W,
         balanced: bool = True,
+        crop_card: bool = False,
+        use_precrop: bool = True,
     ) -> None:
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.image_h = image_h
         self.image_w = image_w
         self.balanced = balanced
+        self.crop_card = crop_card
+        self.use_precrop = use_precrop
 
     def train_loader(self) -> DataLoader:
-        records = load_records("train")
-        ds = PSACardDataset(records, self.image_h, self.image_w, train=True)
+        records = load_records("train", use_precrop=self.use_precrop)
+        ds = PSACardDataset(
+            records, self.image_h, self.image_w, train=True, crop_card=self.crop_card
+        )
         sampler = _balanced_sampler(records) if self.balanced else None
         return DataLoader(
             ds,
@@ -176,9 +214,21 @@ class PSACardDataModule:
         )
 
     def val_loader(self) -> DataLoader:
-        ds = PSACardDataset(load_records("val"), self.image_h, self.image_w, train=False)
+        ds = PSACardDataset(
+            load_records("val", use_precrop=self.use_precrop),
+            self.image_h,
+            self.image_w,
+            train=False,
+            crop_card=self.crop_card,
+        )
         return DataLoader(ds, batch_size=self.batch_size, num_workers=self.num_workers, pin_memory=True)
 
     def test_loader(self) -> DataLoader:
-        ds = PSACardDataset(load_records("test"), self.image_h, self.image_w, train=False)
+        ds = PSACardDataset(
+            load_records("test", use_precrop=self.use_precrop),
+            self.image_h,
+            self.image_w,
+            train=False,
+            crop_card=self.crop_card,
+        )
         return DataLoader(ds, batch_size=self.batch_size, num_workers=self.num_workers, pin_memory=True)

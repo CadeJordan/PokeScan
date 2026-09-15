@@ -12,6 +12,8 @@ num_workers: 4
 image_h: 840
 image_w: 600
 balanced_sampler: true
+use_precrop: true
+crop_card: false
 
 max_epochs: 30
 precision: 16-mixed
