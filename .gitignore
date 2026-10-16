@@ -5,6 +5,7 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+test-artifacts/
 .ipynb_checkpoints/
 .env
 .env.local
