@@ -168,6 +168,26 @@ def test_detection_rate_sweep(capsys):
     assert supported_rate >= 0.97
 
 
+# Detection runs on every API request (front + back). ~0.13 s/image on a
+# 1024x600 slab photo on a dev laptop; the budget is loose so only a real
+# regression (like the 2x slowdown numpy channel max/min once caused) fails.
+DETECT_BUDGET_S = 0.30
+
+
+@pytest.mark.slow
+def test_detection_speed():
+    import time
+
+    scenes = [make_scene(seed=s, condition="slab", size=(1024, 640)) for s in range(8)]
+    rgbs = [bgr_to_rgb(s.bgr) for s in scenes]
+    detect_and_crop(rgbs[0])  # warm-up
+    t0 = time.perf_counter()
+    for rgb in rgbs:
+        detect_and_crop(rgb)
+    per_image = (time.perf_counter() - t0) / len(rgbs)
+    assert per_image <= DETECT_BUDGET_S, f"{per_image:.3f}s per image"
+
+
 # --------------------------------------------------------------------------- #
 # Negatives / fallback
 # --------------------------------------------------------------------------- #

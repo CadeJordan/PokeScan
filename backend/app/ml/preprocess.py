@@ -131,10 +131,11 @@ def _fit_quad(hull: np.ndarray) -> np.ndarray | None:
 def _chroma(bgr: np.ndarray) -> np.ndarray:
     """max(B,G,R) - min(B,G,R): colourfulness that stays ~0 on dark greys
     (HSV saturation blows up there)."""
-    return cv2.subtract(bgr.max(axis=2), bgr.min(axis=2))
+    b, g, r = cv2.split(bgr)  # cv2 max/min: same values, ~20x faster than axis=2
+    return cv2.subtract(cv2.max(cv2.max(b, g), r), cv2.min(cv2.min(b, g), r))
 
 
-def _edge_maps(bgr: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
+def _edge_maps(bgr: np.ndarray, chroma: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
     """(edge map, source channel) pairs from a few settings, most conservative first.
 
     The chroma channel separates a coloured card border from a grey or
@@ -145,7 +146,7 @@ def _edge_maps(bgr: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
     smooth = cv2.bilateralFilter(gray, 7, 50, 50)
     med = float(np.median(smooth))
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(smooth)
-    chroma = cv2.bilateralFilter(_chroma(bgr), 7, 50, 50)
+    chroma = cv2.bilateralFilter(chroma, 7, 50, 50)
     variants = [
         (smooth, 60, 180),
         (smooth, max(5, int(0.5 * med)), max(15, int(1.2 * med))),
@@ -189,18 +190,24 @@ class _Grad:
 
     def __init__(self, gray: np.ndarray):
         g = cv2.GaussianBlur(gray, (5, 5), 0).astype(np.float32)
-        self.gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
-        self.gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
-        self.mag = np.sqrt(self.gx**2 + self.gy**2) + 1e-6
+        gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+        mag = cv2.magnitude(gx, gy) + 1e-6
+        # Unit gradient, so `oriented` needs two lookups and no division.
+        self.ux = gx / mag
+        self.uy = gy / mag
 
     def oriented(self, edges: np.ndarray, xs: np.ndarray, ys: np.ndarray, nrm: np.ndarray) -> np.ndarray:
         """Edge pixels at (xs, ys) whose gradient is along the side normal.
 
         Card sides are straight edges, so their gradient points across the
         side; text and artwork edges crossed by a chord point every which way.
+        Orientation is only computed where there is an edge pixel (sparse).
         """
-        along = np.abs(self.gx[ys, xs] * nrm[0] + self.gy[ys, xs] * nrm[1]) / self.mag[ys, xs]
-        return (edges[ys, xs] > 0) & (along >= _MIN_ORIENT_COS)
+        hit = edges[ys, xs] > 0
+        hx, hy = xs[hit], ys[hit]
+        hit[hit] = np.abs(self.ux[hy, hx] * nrm[0] + self.uy[hy, hx] * nrm[1]) >= _MIN_ORIENT_COS
+        return hit
 
 
 def _side_frame(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
@@ -271,7 +278,9 @@ def _snap_quad(edges: np.ndarray, grad: _Grad, quad: np.ndarray, n: int = 40) ->
         pts = base[None, None] + shift[..., None] * nrm  # (R, R, n, 2)
         xs = np.clip(np.round(pts[..., 0]).astype(int), 0, w - 1)
         ys = np.clip(np.round(pts[..., 1]).astype(int), 0, h - 1)
-        score = grad.oriented(edges, xs, ys, nrm).mean(axis=-1) - penalty
+        # Integer count / n equals the bool mean exactly, without float64 temporaries.
+        hits = grad.oriented(edges, xs, ys, nrm).view(np.uint8).sum(axis=-1, dtype=np.uint16)
+        score = hits / n - penalty
         bi, bj = np.unravel_index(int(np.argmax(score)), score.shape)
         lines.append((a + offs[bi] * nrm, b + offs[bj] * nrm))
     corners = []
@@ -294,10 +303,16 @@ def _candidates(gray: np.ndarray, edges: np.ndarray, grad: _Grad) -> list[_Cand]
     contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     mx, my = max(3, round(_BORDER_FRAC * w)), max(3, round(_BORDER_FRAC * h))
     out = []
+    min_area = _MIN_AREA_FRAC * img_area
     for c in contours:
+        # The hull fits in the bounding box, so this cheap check skips the
+        # many small edge fragments before computing any hull.
+        _, _, bw, bh = cv2.boundingRect(c)
+        if bw * bh < min_area:
+            continue
         hull = cv2.convexHull(c)
         hull_area = cv2.contourArea(hull)
-        if hull_area < _MIN_AREA_FRAC * img_area:
+        if hull_area < min_area:
             continue
         x, y, bw, bh = cv2.boundingRect(hull)
         if x <= mx or y <= my or x + bw >= w - mx or y + bh >= h - my:
@@ -415,8 +430,11 @@ def _find_card_quad(bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
 
     chroma = _chroma(bgr)
     cands: list[_Cand] = []
-    for edges, src in _edge_maps(bgr):
-        cands.extend(_candidates(gray, edges, _Grad(src)))
+    grads: dict[int, _Grad] = {}  # two edge maps share the smoothed gray
+    for edges, src in _edge_maps(bgr, chroma):
+        if id(src) not in grads:
+            grads[id(src)] = _Grad(src)
+        cands.extend(_candidates(gray, edges, grads[id(src)]))
     if not cands:
         return None
     # Prefer, in order: well-supported outlines with the card's proportions,
