@@ -12,6 +12,8 @@ num_workers: 4
 image_h: 840
 image_w: 600
 balanced_sampler: true
+sampler_power: 0.5        # weights = count^-power: 0 uniform, 0.5 1/sqrt(count), 1 inverse freq
+aug_strength: 1.0         # photometric aug scale (lighting/white balance only; 0 = off)
 use_precrop: true
 crop_card: false
 
@@ -19,4 +21,6 @@ max_epochs: 30
 precision: 16-mixed
 gradient_clip_val: 1.0
 early_stop_patience: 6
+monitor: val/qwk           # checkpoint + early-stop metric (MAE favours always-10)
+monitor_mode: max
 seed: 42
