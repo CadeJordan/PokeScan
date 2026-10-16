@@ -258,6 +258,33 @@ class Sample:
     grade: int
     front: Path
     back: Path
+    crop_kind: str = "unknown"  # combined front/back kind recorded by precrop
+
+
+# Worst-first: a pair is as good as its worse side.
+_KIND_ORDER = ("none", "small", "well", "unknown", "card")
+
+
+def combine_crop_kinds(front: str | None, back: str | None) -> str:
+    kinds = [k if k in _KIND_ORDER else "unknown" for k in (front, back)]
+    return min(kinds, key=_KIND_ORDER.index)
+
+
+def _crop_kinds_by_cert(certs: list[str]) -> dict[str, str]:
+    """Crop kinds as recorded by precrop (same detector, same raw photos)."""
+    from backend.app.core.config import get_settings
+    from ml.data.db import connect
+
+    if not certs:
+        return {}
+    out: dict[str, str] = {}
+    with connect(get_settings().db_path) as conn:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(certs)")}
+        if not {"crop_kind_front", "crop_kind_back"} <= cols:
+            return {}
+        for r in conn.execute("SELECT cert_number, crop_kind_front, crop_kind_back FROM certs"):
+            out[r["cert_number"]] = combine_crop_kinds(r["crop_kind_front"], r["crop_kind_back"])
+    return out
 
 
 def load_samples(split: str, limit: int | None = None) -> list[Sample]:
@@ -268,7 +295,11 @@ def load_samples(split: str, limit: int | None = None) -> list[Sample]:
     recs.sort(key=lambda r: r.cert_number)
     if limit:
         recs = recs[:limit]
-    return [Sample(r.cert_number, r.grade, r.front_path, r.back_path) for r in recs]
+    kinds = _crop_kinds_by_cert([r.cert_number for r in recs])
+    return [
+        Sample(r.cert_number, r.grade, r.front_path, r.back_path, kinds.get(r.cert_number, "unknown"))
+        for r in recs
+    ]
 
 
 def load_manifest(path: Path, limit: int | None = None) -> list[Sample]:
@@ -308,7 +339,7 @@ def load_manifest(path: Path, limit: int | None = None) -> list[Sample]:
 def predict_all(service, samples: list[Sample], perturb=None, progress: bool = True) -> dict:
     from tqdm import tqdm
 
-    rows = {k: [] for k in ("grade", "pred_int", "pred_soft", "confidence", "quad_front", "quad_back", "latency")}
+    rows = {k: [] for k in ("grade", "pred_int", "pred_soft", "confidence", "quad_front", "quad_back", "latency", "crop_kind")}
     it = tqdm(samples, desc=perturb[0] if perturb else "eval", disable=not progress)
     for s in it:
         front, back = s.front.read_bytes(), s.back.read_bytes()
@@ -325,7 +356,24 @@ def predict_all(service, samples: list[Sample], perturb=None, progress: bool = T
         rows["confidence"].append(p.confidence)
         rows["quad_front"].append(p.found_quad_front)
         rows["quad_back"].append(p.found_quad_back)
+        rows["crop_kind"].append(s.crop_kind)
     return {k: np.asarray(v) for k, v in rows.items()}
+
+
+def filter_rows(rows: dict, mask: np.ndarray) -> dict:
+    return {k: v[mask] for k, v in rows.items()}
+
+
+def crop_kind_breakdown(rows: dict) -> dict:
+    """Count and MAE per crop kind, so loose (well) or bad crops are visible."""
+    kinds = rows.get("crop_kind")
+    if kinds is None or len(kinds) == 0:
+        return {}
+    err = np.abs(rows["pred_int"] - rows["grade"])
+    return {
+        str(k): {"n": int((kinds == k).sum()), "mae": float(err[kinds == k].mean())}
+        for k in sorted(set(kinds.tolist()), key=_KIND_ORDER.index)
+    }
 
 
 def build_report(
@@ -356,6 +404,7 @@ def build_report(
             "mae_both_found": float(np.abs(pi - true)[both_found].mean()) if both_found.any() else None,
             "mae_fallback": float(np.abs(pi - true)[~both_found].mean()) if (~both_found).any() else None,
             "n_fallback": int((~both_found).sum()),
+            "crop_kinds": crop_kind_breakdown(rows),
         },
         "latency_ms": {
             "p50": float(np.percentile(lat, 50)),
@@ -498,7 +547,11 @@ def run_evaluation(
     manifest: Path | None = None,
     tta: bool = False,
     n_boot: int = 1000,
+    exclude_fallback: bool = False,
 ) -> dict:
+    """Evaluate a model. `exclude_fallback` drops cards where live detection
+    fell back to the raw photo (for PSA slabs the label shows the grade) from
+    the metrics; the pipeline section still describes every card."""
     from backend.app.ml.inference import GradeInferenceService
 
     service = GradeInferenceService(model_path=model_path, tta=tta)
@@ -519,10 +572,18 @@ def run_evaluation(
 
     rows = predict_all(service, samples, progress=progress)
     report = build_report(rows, train_grades, n_boot=n_boot)
+    if exclude_fallback:
+        both_found = rows["quad_front"] & rows["quad_back"]
+        if not both_found.any():
+            raise RuntimeError("every card fell back; nothing left to evaluate")
+        pipeline = report["pipeline"]
+        report = build_report(filter_rows(rows, both_found), train_grades, n_boot=n_boot)
+        report["pipeline"] = {**pipeline, "excluded_from_metrics": int((~both_found).sum())}
     report["meta"] = {
         "split": split,
         "manifest": str(manifest) if manifest is not None else None,
         "tta": list(service.tta),
+        "exclude_fallback": exclude_fallback,
         "model_path": str(service.model_path),
         "model_metadata": service.metadata,
         "providers": service._session.get_providers(),
@@ -569,6 +630,9 @@ def main(
         False, help="Test-time augmentation: average over hflip + dim/bright variants."
     ),
     n_boot: int = typer.Option(1000, help="Bootstrap resamples for 95% CIs (0 disables)."),
+    exclude_fallback: bool = typer.Option(
+        False, help="Leave cards whose detection fell back (label visible) out of the metrics."
+    ),
 ) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     if save_baseline and (manifest is not None or tta):
@@ -581,6 +645,7 @@ def main(
         manifest=manifest,
         tta=tta,
         n_boot=n_boot,
+        exclude_fallback=exclude_fallback,
     )
     split = report["meta"]["split"]
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -607,7 +672,12 @@ def main(
     typer.echo(f"  baseline majority={b['majority_grade']['grade']}: MAE {b['majority_grade']['mae']:.3f} "
                f"exact {b['majority_grade']['exact']:.1%}")
     pl = report["pipeline"]
-    typer.echo(f"  quad found: front {pl['quad_found_front']:.1%}  back {pl['quad_found_back']:.1%}")
+    typer.echo(f"  quad found: front {pl['quad_found_front']:.1%}  back {pl['quad_found_back']:.1%}"
+               + (f"  ({pl['excluded_from_metrics']} fallback cards excluded from metrics)"
+                  if "excluded_from_metrics" in pl else ""))
+    if pl.get("crop_kinds"):
+        typer.echo("  crop kinds: " + "  ".join(
+            f"{k} n={v['n']} MAE {v['mae']:.2f}" for k, v in pl["crop_kinds"].items()))
     typer.echo(f"  latency p50 {report['latency_ms']['p50']:.0f} ms  p95 {report['latency_ms']['p95']:.0f} ms")
     for name, r in report.get("robustness", {}).items():
         typer.echo(f"  {name:12s} MAE {r['mae']:.3f} ({r['mae_delta']:+.3f})  flips {r['grade_flip_rate']:.1%}")

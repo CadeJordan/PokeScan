@@ -16,6 +16,7 @@ balanced_sampler: true
 sampler_power: 0.5        # weights = count^-power: 0 uniform, 0.5 1/sqrt(count), 1 inverse freq
 aug_strength: 1.0         # photometric aug scale (lighting/white balance only; 0 = off)
 use_precrop: true
+crop_kinds: [card, well, unknown]  # drop "small" (often inner frames cutting off the card edge); unknown = non-PSA photos
 crop_card: false
 
 max_epochs: 30

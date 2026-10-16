@@ -253,3 +253,80 @@ def test_load_manifest_validates(tmp_path):
     p.write_text("front,back,grade\nf.jpg,f.jpg,11\n")
     with pytest.raises(ValueError, match="outside"):
         load_manifest(p)
+
+
+# --------------------------------------------------------------------------- #
+# Crop kinds + excluding fallback (label-visible) cards
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("front", "back", "expected"),
+    [("card", "card", "card"), ("card", "well", "well"), ("well", "small", "small"),
+     ("none", "card", "none"), ("card", None, "unknown"), ("unknown", "card", "unknown")],
+)
+def test_combine_crop_kinds(front, back, expected):
+    from ml.eval.evaluate import combine_crop_kinds
+
+    assert combine_crop_kinds(front, back) == expected
+
+
+def test_crop_kind_breakdown_in_report():
+    rows = _rows(n=6)
+    rows["grade"] = np.array([10, 10, 9, 9, 8, 8])
+    rows["pred_int"] = np.array([10, 9, 9, 9, 6, 8])
+    rows["crop_kind"] = np.array(["card", "card", "well", "well", "small", "card"])
+    kinds = build_report(rows, n_boot=0)["pipeline"]["crop_kinds"]
+    assert list(kinds) == ["small", "well", "card"]  # worst first
+    assert kinds["card"] == {"n": 3, "mae": pytest.approx(1 / 3)}
+    assert kinds["small"]["mae"] == 2.0
+
+
+class _FakePrediction:
+    def __init__(self, grade, found):
+        self.grade = float(grade)
+        self.grade_int = grade
+        self.confidence = 0.5
+        self.found_quad_front = found
+        self.found_quad_back = True
+
+
+class _FakeService:
+    """Predicts the true grade only when the card is NOT found (a 'label leak')."""
+
+    ready = True
+    tta = ()
+    model_path = "fake.onnx"
+    metadata: dict = {}
+
+    class _session:  # noqa: N801
+        @staticmethod
+        def get_providers():
+            return ["CPUExecutionProvider"]
+
+    def __init__(self, *_a, **_k):
+        pass
+
+    def predict(self, front: bytes, back: bytes):
+        grade, found = int(front[:2]), front[2:] == b"found"
+        return _FakePrediction(grade if not found else 1, found)
+
+
+def test_exclude_fallback_drops_leaky_cards(tmp_path, monkeypatch):
+    import backend.app.ml.inference as inference
+    import ml.eval.evaluate as ev
+
+    samples = []
+    for i, (grade, found) in enumerate([(10, False), (9, False), (10, True), (8, True)]):
+        f = tmp_path / f"{i}.jpg"
+        f.write_bytes(f"{grade:02d}".encode() + (b"found" if found else b"fallback"))
+        samples.append(ev.Sample(str(i), grade, f, f, "card" if found else "none"))
+    monkeypatch.setattr(inference, "GradeInferenceService", _FakeService)
+    monkeypatch.setattr(ev, "load_samples", lambda split, limit=None: samples)
+
+    leaky = ev.run_evaluation(robustness_limit=0, progress=False, n_boot=0)
+    clean = ev.run_evaluation(robustness_limit=0, progress=False, n_boot=0, exclude_fallback=True)
+
+    assert leaky["overall"]["n"] == 4 and leaky["overall"]["exact"] == 0.5
+    assert clean["overall"]["n"] == 2 and clean["overall"]["exact"] == 0.0
+    assert clean["pipeline"]["excluded_from_metrics"] == 2
+    assert clean["pipeline"]["n_fallback"] == 2  # pipeline still describes every card
+    assert clean["meta"]["exclude_fallback"] is True

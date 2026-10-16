@@ -28,6 +28,8 @@ log = logging.getLogger("precompute_factors")
 
 app = typer.Typer(add_completion=False)
 
+COMMIT_EVERY = 50
+
 
 def _resolve_image(images_root: Path, rel_path: str) -> Path | None:
     p = images_root / rel_path
@@ -76,7 +78,10 @@ def main(
     ok = skipped = failed = 0
 
     with connect(db) as conn:
-        for row in tqdm(rows, desc="factor labels"):
+        for i, row in enumerate(tqdm(rows, desc="factor labels")):
+            # Commit in batches so an interrupted run keeps what it has done.
+            if i and i % COMMIT_EVERY == 0:
+                conn.commit()
             cert = row["cert_number"]
             front = _resolve_image(images_root, row["front_path"])
             back = _resolve_image(images_root, row["back_path"])
