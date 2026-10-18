@@ -31,11 +31,12 @@ jobs:
       - name: Install system libraries
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libglib2.0-0
 
-      # CPU-only torch first, so the editable install doesn't pull the multi-GB CUDA wheels
+      # CPU-only torch first, so the editable install doesn't pull the multi-GB CUDA wheels.
+      # Pinned to the local version until constraints.txt lands (intent/pinned-dev-environment).
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev]"
 
       - name: Ruff
