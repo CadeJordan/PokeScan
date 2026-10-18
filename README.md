@@ -62,6 +62,8 @@ cd PokeScan
 
 ### 2. Python environment
 
+> **Note:** `.venv` is currently near-empty; the working environment is the global pyenv Python 3.11.6 (with `pokescan` installed editable). Use plain `python` there until `intent/pinned-dev-environment` lands.
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -180,11 +182,22 @@ Both sources write to the same SQLite `certs` table with a `source` column (`psa
 python -m ml.data.ebay_collect --grades 6 7 8 9 10 --per-grade 500
 ```
 
-Low grades are scarce on eBay; run additional passes if needed:
+Low grades are scarce (the PSA test split has only ~20 cards graded 8 or
+below), so run a dedicated low-grade pass. `--per-grade` is a target; the
+collector stops early when eBay runs out of matching listings. Then re-split
+and re-crop so the new certs are usable:
 
 ```powershell
-python -m ml.data.ebay_collect --grades 1 2 3 4 5 --per-grade 200
+python -m ml.data.ebay_collect --grades 1 2 3 4 5 6 7 8 --per-grade 300
+python -m ml.data.split          # eBay certs always go to train; PSA keeps val/test
+python -m ml.data.precrop        # crops only the new certs (add --force to rebuild all)
+python -m ml.data.precompute_factors   # only if you train multitask.yaml
 ```
+
+`split.py` stratifies **only PSA certs** into val/test; every `source='ebay'`
+cert goes to train (`--ebay-split stratify` restores the old behaviour). Adding
+eBay rows therefore never reshuffles the PSA val/test assignment, and the eval
+numbers stay comparable across harvests.
 
 ### PSA (high-fidelity validation sample)
 
@@ -236,6 +249,126 @@ Training configs default to `use_precrop: true` and skip live `detect_and_crop`.
 
 The export step writes `data/models/grade_model.onnx` (or the path in
 `ACTIVE_MODEL_PATH`). Restart the API to load the new weights.
+
+### Training knobs (all configs)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `sampler_power` | `0.5` | Sampler weights `count(grade) ** -power`. `0` = natural distribution, `0.5` = `1/sqrt(count)`, `1` = full inverse frequency (the old behaviour; draws the single grade-1 card ~1000x more than a 10 and biases the model low). Only used when `balanced_sampler: true`. |
+| `aug_strength` | `1.0` | Scales the lighting/colour augmentation (brightness, contrast, gamma, white balance, small hue shift, rare mild CLAHE). `0` turns it off. No blur, noise, scratches or crops, ever. |
+| `monitor` / `monitor_mode` | `val/qwk` / `max` | Metric for checkpointing and early stopping. MAE rewards always predicting 10; QWK does not. Checkpoints are named `best-EE-qwk0.XXX.ckpt`. |
+| `run_name` | unset | Sub-folder for checkpoints (`data/models/checkpoints/<run_name>/`) and CSV logs. |
+
+`train.py` also takes `--sampler-power`, `--aug-strength` and `--run-name` to
+override the config from the command line.
+
+### Calibration: temperature + threshold offsets
+
+`export.py` fits two things on the val split and bakes both into the graph as
+`corn_logits = logits / T + b`, so the API and `/api/health` need no changes:
+
+1. a temperature `T` (minimises val NLL, so confidences are calibrated), and
+2. nine per-threshold offsets `b` (coordinate search that minimises val
+   `MAE - QWK`; `--offset-objective mae|qwk` to change). This removes
+   systematic grade bias without retraining. `T` is then re-fitted on the
+   offset logits; that never changes a hard grade.
+
+Both values and the val metrics before/after go into `grade_model.json`
+(`temperature`, `threshold_offsets`, `val_metrics_temperature_only`,
+`val_metrics_calibrated`). Flags: `--no-fit-offsets` (temperature only),
+`--offsets-json <file>` (re-use offsets from an earlier `grade_model.json` or
+calibration JSON), `--calibration-only` (fit and report, write nothing under
+`data/models/`), `--no-activate` (export to `--out-onnx` without replacing the
+served model).
+
+**Quick win: re-export the current checkpoint with offsets** (no retraining):
+
+```powershell
+# 1. Preview: fit on val, print MAE/QWK/bias before -> after, write nothing under data/models/
+python -m ml.training.export --checkpoint data/models/checkpoints/best-14-0.863.ckpt --calibration-only --calibration-out test-artifacts/calibration_v4.json
+
+# 2. Export side by side and evaluate it on test before promoting it
+python -m ml.training.export --checkpoint data/models/checkpoints/best-14-0.863.ckpt `
+  --out-onnx data/models/candidates/v4_offsets.onnx --out-torchscript data/models/candidates/v4_offsets.pt --no-activate
+python -m ml.eval.evaluate --split test --model-path data/models/candidates/v4_offsets.onnx --out-dir test-artifacts/eval/v4_offsets
+
+# 3. Promote it if it wins (or re-run step 2 without --no-activate), then restart the API
+python -m ml.training.export --checkpoint data/models/checkpoints/best-14-0.863.ckpt --offsets-json data/models/candidates/v4_offsets.json
+```
+
+Do the same with the single-task v3 checkpoint (`best-03-0.668.ckpt`).
+
+### Experiment matrix
+
+Run each configuration on the same clean crops (Step 1 done, `precrop --force`
+run). Pick the winner by **val** QWK, then confirm it on **test**. It must beat
+always-predict-10 on MAE (0.64 on the current test split).
+
+| Run | Config | `sampler_power` |
+|---|---|---|
+| `mvp_sp0` | `mvp.yaml` | 0 |
+| `mvp_sp05` | `mvp.yaml` | 0.5 |
+| `mvp_sp1` | `mvp.yaml` | 1 |
+| `mt_sp0` | `multitask.yaml` | 0 |
+| `mt_sp05` | `multitask.yaml` | 0.5 |
+| `mt_sp1` | `multitask.yaml` | 1 |
+
+```powershell
+# Train (use mvp_8gb.yaml instead of mvp.yaml on an 8 GB GPU)
+foreach ($p in 0, 0.5, 1) {
+  $tag = "$p".Replace(".", "")
+  python -m ml.training.train --config ml/training/configs/mvp.yaml       --sampler-power $p --run-name "mvp_sp$tag"
+  python -m ml.training.train --config ml/training/configs/multitask.yaml --sampler-power $p --run-name "mt_sp$tag"
+}
+
+# Export each run's best checkpoint (highest qwk in the file name) side by side
+foreach ($run in "mvp_sp0", "mvp_sp05", "mvp_sp1", "mt_sp0", "mt_sp05", "mt_sp1") {
+  $ckpt = Get-ChildItem "data/models/checkpoints/$run/best-*.ckpt" |
+    Sort-Object { [double][regex]::Match($_.Name, 'qwk(-?\d+\.\d+)').Groups[1].Value } |
+    Select-Object -Last 1
+  python -m ml.training.export --checkpoint $ckpt.FullName `
+    --out-onnx "data/models/candidates/$run.onnx" --out-torchscript "data/models/candidates/$run.pt" --no-activate
+  python -m ml.eval.evaluate --split val --no-robustness --model-path "data/models/candidates/$run.onnx" --out-dir "test-artifacts/eval/$run-val"
+}
+
+# Winner: full test evaluation, promote it, and pin it as the regression baseline
+python -m ml.eval.evaluate --split test --model-path data/models/candidates/<winner>.onnx --out-dir test-artifacts/eval/<winner>
+python -m ml.training.export --checkpoint <winner checkpoint> --offsets-json data/models/candidates/<winner>.json
+python -m ml.eval.evaluate --split test --save-baseline
+```
+
+Each run's CSV log (`data/models/logs/<run>/version_*/metrics.csv`) has
+`val/qwk`, `val/mae` and `test/qwk` per epoch if you want to plot the runs.
+
+## Evaluate
+
+```powershell
+python -m ml.eval.evaluate --split test                 # full report + charts in test-artifacts/eval/
+python -m ml.eval.evaluate --split test --tta           # average over hflip + dim/bright copies
+python -m ml.eval.evaluate --split test --n-boot 2000   # tighter CI estimates (default 1000; 0 = off)
+```
+
+The report includes 95% bootstrap CIs for MAE, QWK, exact and bias, plus a
+per-grade table with a Wilson CI on recall and a bootstrap CI on MAE. Low
+grades with a handful of test cards show very wide intervals; don't read much
+into them. `--tta` only affects the evaluation; the API default is unchanged
+(`GradeInferenceService(tta=True)` turns it on in code).
+
+**Raw (unslabbed) cards.** Every training photo is through PSA plastic. Before
+trusting the model on raw cards, build a separate labelled set (e.g. from eBay
+"ungraded" listings with a known later grade, or your own photos) and evaluate
+it with a CSV manifest:
+
+```csv
+front,back,grade,id
+raw/charizard_front.jpg,raw/charizard_back.jpg,8,charizard-1
+```
+
+```powershell
+python -m ml.eval.evaluate --manifest data/raw_eval/manifest.csv --out-dir test-artifacts/eval/raw
+```
+
+Relative paths resolve against the CSV's folder; `id` is optional.
 
 ## Data sources
 

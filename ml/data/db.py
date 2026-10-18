@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS certs (
@@ -55,6 +55,19 @@ _PRECROP_COLUMNS = (
     "precrop_at",
 )
 
+# Precrop outcome per side, written by precrop.py. `crop_found_*` is 1 when a
+# card outline was detected (0 = the crop is the padded raw slab photo, label
+# included, and must never be trained on). `crop_kind_*` is 'card' (tight on
+# the card), 'well' (the slab well/interior around the card: looser, but no
+# label), 'small' (small-format card, or an outline inside the card),
+# 'none' (not found) or 'unknown' (non-PSA framing, not classified).
+_CROP_STATUS_COLUMNS = {
+    "crop_found_front": "INTEGER",
+    "crop_found_back": "INTEGER",
+    "crop_kind_front": "TEXT",
+    "crop_kind_back": "TEXT",
+}
+
 
 def _migrate(conn) -> None:
     """Best-effort additive migration for pre-existing DBs."""
@@ -68,6 +81,9 @@ def _migrate(conn) -> None:
     for col in _PRECROP_COLUMNS:
         if col not in cols:
             col_type = "TEXT"
+            conn.execute(f"ALTER TABLE certs ADD COLUMN {col} {col_type}")
+    for col, col_type in _CROP_STATUS_COLUMNS.items():
+        if col not in cols:
             conn.execute(f"ALTER TABLE certs ADD COLUMN {col} {col_type}")
 
 
@@ -156,11 +172,24 @@ def update_precrop_paths(
     *,
     cropped_front_path: str,
     cropped_back_path: str,
+    found_front: bool | None = None,
+    found_back: bool | None = None,
+    kind_front: str | None = None,
+    kind_back: str | None = None,
 ) -> None:
     conn.execute(
         "UPDATE certs SET cropped_front_path=?, cropped_back_path=?, "
+        "crop_found_front=?, crop_found_back=?, crop_kind_front=?, crop_kind_back=?, "
         "precrop_at=datetime('now') WHERE cert_number=?",
-        (cropped_front_path, cropped_back_path, cert_number),
+        (
+            cropped_front_path,
+            cropped_back_path,
+            None if found_front is None else int(found_front),
+            None if found_back is None else int(found_back),
+            kind_front,
+            kind_back,
+            cert_number,
+        ),
     )
 
 
@@ -187,3 +216,20 @@ def grade_distribution(conn: sqlite3.Connection) -> dict[int, int]:
         "GROUP BY grade_int ORDER BY grade_int"
     ).fetchall()
     return {int(r[0]): int(r[1]) for r in rows}
+
+
+def precrop_coverage_by_split(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
+    """Per split: usable certs, certs with crop files, and certs whose front
+    and back outlines were both found (usable for training)."""
+    rows = conn.execute(
+        "SELECT COALESCE(split, 'none') AS split, COUNT(*) AS total, "
+        "SUM(cropped_front_path IS NOT NULL AND cropped_back_path IS NOT NULL) AS cropped, "
+        "SUM(COALESCE(crop_found_front, 0) = 1 AND COALESCE(crop_found_back, 0) = 1) AS found, "
+        "SUM(crop_kind_front = 'card' AND crop_kind_back = 'card') AS card "
+        "FROM certs WHERE is_pokemon=1 AND has_images=1 AND grade_int IS NOT NULL "
+        "AND front_path IS NOT NULL AND back_path IS NOT NULL GROUP BY 1"
+    ).fetchall()
+    return {
+        r["split"]: {k: int(r[k] or 0) for k in ("total", "cropped", "found", "card")}
+        for r in rows
+    }

@@ -64,7 +64,7 @@ async def _read_image(upload: UploadFile, label: str) -> bytes:
     if len(data) == 0:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=f"{label}: empty upload")
     if len(data) > MAX_BYTES:
-        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=f"{label}: too large")
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, detail=f"{label}: too large")
     return data
 
 

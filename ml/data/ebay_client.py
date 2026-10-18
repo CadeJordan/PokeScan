@@ -15,9 +15,10 @@ import base64
 import logging
 import re
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import httpx
 from tenacity import (
@@ -96,7 +97,7 @@ class EBayClient:
         self._token_expiry: float = 0.0
         self._client = httpx.AsyncClient(timeout=timeout_s)
 
-    async def __aenter__(self) -> "EBayClient":
+    async def __aenter__(self) -> EBayClient:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
