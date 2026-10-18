@@ -10,7 +10,9 @@ PokeScan predicts a PSA grade (1–10) for a Pokémon card from front + back pho
 
 ## Commands
 
-Run all Python commands from `PokeScan/` with the venv active (`.\.venv\Scripts\Activate.ps1`). Modules are invoked as `python -m ...` because `backend` and `ml` import each other as top-level packages (`pip install -e ".[dev]"`).
+Run all Python commands from `PokeScan/`. Modules are invoked as `python -m ...` because `backend` and `ml` import each other as top-level packages (`pip install -e ".[dev]"`).
+
+Interpreter: `.venv` is currently near-empty. The working environment is the global pyenv Python 3.11.6, where `pokescan` is installed editable (torch 2.5.1+cu121). Use plain `python` and don't activate `.venv` until `intent/pinned-dev-environment` lands. Don't install or upgrade packages in the global env without asking.
 
 ```powershell
 # API (needs data/models/grade_model.onnx, else /api/grade returns 503)
@@ -20,9 +22,12 @@ uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000
 npm run dev        # also: npm run build, npm run lint
 npm run preview    # Cloudflare runtime via OpenNext; npm run deploy to ship
 
-# Lint / tests (pytest testpaths are backend/tests and ml/tests; none exist yet)
+# Lint / tests (testpaths: backend/tests, ml/tests)
 ruff check .
-pytest path/to/test_file.py::test_name
+python -m pytest -m "not slow and not visual and not model"   # fast suite, ~3 min; baseline 248 passed, 3 xfailed
+python -m pytest path/to/test_file.py::test_name
+# markers: slow (sweeps, full test-split eval), model (needs data/models/grade_model.onnx, else skips),
+#          visual (writes overlays to test-artifacts/overlays/)
 
 # Data collection
 python -m ml.data.ebay_collect --grades 6 7 8 9 10 --per-grade 500
@@ -59,3 +64,25 @@ python -m ml.training.export --checkpoint data/models/checkpoints/best-XX.ckpt
 - Training augmentations are deliberately conservative: never add anything that changes apparent condition (blur, scratches, edge crops, heavy rotation).
 - Use `num_workers: 0` on Windows if DataLoader workers misbehave (see `smoke.yaml`).
 - Don't put data under `frontend/data/` (gitignored; an easy mistake after `cd frontend`).
+- `data/` (images, crops, `pokescan.sqlite`, models) is the only copy of quota-limited harvest data. Never download, move, or delete images, or rewrite the DB, unless the task explicitly asks. Tests must use `tmp_path` and only *read* real data.
+- Long jobs (`precompute_factors --force`, `precrop --force`, collectors) may already be running and writing the DB. Check before starting another DB-writing command, and don't run two at once.
+- Card images exist in git history (commit `608c429`, ~271 MiB). Don't `git add` anything under `data/`. History rewriting is pending a decision (`intent/git-history-image-purge`).
+- Known open question: `decode_corn_logits` uses `cummin(sigmoid)` while `corn_loss` trains conditional probabilities. See `intent/corn-decode-verification` before touching decoding, calibration, or the soft grade.
+
+## Intent specs
+
+Planned changes live in `intent/<spec-name>/intent.md` (intent, scope, out of scope, acceptance criteria, facts vs assumptions). Fixes too small for a spec are listed in `intent/smallfix.md`. Before working on one, read its spec. Check off acceptance criteria as they're met, and don't widen scope beyond "Out of scope" without asking.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues on CadeJordan/PokeScan, managed with the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Uses the five default labels: needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one root `GLOSSARY.md` plus `docs/adr/`, both created when first needed. See `docs/agents/domain.md`.
