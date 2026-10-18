@@ -124,10 +124,30 @@ def test_clean_card_is_pristine(seed):
         assert f.flags == []
 
 
-def test_rounded_corners_degrade_corners():
-    res = _analyze(rounded_corners(make_card()))
-    assert res["corners"].grade <= 7.0
-    assert "rounded" in res["corners"].flags
+def _corner_rounding(card: np.ndarray) -> float:
+    scene = make_scene(seed=0, condition="clean", card=card)
+    crop = detect_and_crop(bgr_to_rgb(scene.bgr))
+    pts = crop.contour.reshape(-1, 2).astype(np.float64)
+    quad = crop.quad.astype(np.float64)
+    mean_len = float(np.mean([np.linalg.norm(quad[(i + 1) % 4] - quad[i]) for i in range(4)]))
+    return max(r for r, _ in condition._corner_geometry(pts, quad, mean_len))
+
+
+def test_corner_rounding_grows_with_radius():
+    # Floors are calibrated on real slab photos, where factory corner radius
+    # plus noise already reaches ~0.045 for gem-mint cards, so synthetic
+    # rounding is checked on the raw measurement rather than the grade.
+    raw = [_corner_rounding(rounded_corners(make_card(), r=r)) for r in (0, 30, 60)]
+    assert raw[0] < raw[1] < raw[2]
+
+
+def test_rounding_past_floor_degrades_corners():
+    worn = condition._ROUND_FLOOR + 0.6 * (condition._ROUND_FULL - condition._ROUND_FLOOR)
+    res = condition._corner_factor([(0.0, 0.0), (worn, 0.0), (0.0, 0.0), (0.0, 0.0)])
+    assert res.grade <= 6.0
+    assert res.flags == ["rounded"]
+    clean = condition._corner_factor([(condition._ROUND_FLOOR, condition._JAG_FLOOR)] * 4)
+    assert clean.grade == 10.0
 
 
 def test_scratches_degrade_surface_only():
@@ -145,7 +165,9 @@ def test_heavier_scratching_is_worse():
 
 @pytest.mark.parametrize("seed", range(2))
 def test_rim_whitening_degrades_edges(seed):
-    res = _analyze(whitened_rim(make_card(seed=seed)), seed)
+    # 3 px: whitening is rim *contrast*, so the white must not reach the
+    # band just inside the rim.
+    res = _analyze(whitened_rim(make_card(seed=seed), t=3), seed)
     assert res["edges"].grade < 10.0
 
 
@@ -169,11 +191,11 @@ def test_fallback_crop_skips_geometry():
 # --------------------------------------------------------------------------- #
 def test_worse_side_wins():
     clean = to_jpeg_bytes(make_scene(seed=0, card=make_card(seed=0)).bgr)
-    damaged = to_jpeg_bytes(make_scene(seed=0, card=rounded_corners(make_card(seed=0))).bgr)
+    damaged = to_jpeg_bytes(make_scene(seed=0, card=scratched(make_card(seed=0))).bgr)
     a = compute_condition_subgrades(clean, damaged)
     b = compute_condition_subgrades(damaged, clean)
-    assert a.corners.grade == b.corners.grade <= 7.0
-    assert a.surface.grade == 10.0
+    assert a.surface.grade == b.surface.grade <= 7.0
+    assert a.corners.grade == 10.0
 
 
 def test_condition_picks_min_per_factor(monkeypatch):

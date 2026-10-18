@@ -69,16 +69,22 @@ _WHITE_VAL_FLOOR = 160.0
 _RIM_PX = 3  # thickness of the extreme outer rim
 
 # Normalisation: (floor = clean baseline, full = severity saturates to 1.0).
-# Calibrated on PSA grade-10 vs grade 4-7 cert images (worst of front+back).
-_WHITE_FLOOR = 0.55
-_WHITE_FULL = 0.75
-_ROUND_FLOOR = 0.017
-_ROUND_FULL = 0.050
-_JAG_FLOOR = 0.023
-_JAG_FULL = 0.048
-_WEAR_FLOOR = 0.024
-_WEAR_FULL = 0.042
-_SURF_FLOOR = 15.0
+# Floors sit at the 90th percentile of PSA grade-10 train certs (worst of
+# front+back) so ~90% of gem-mint cards read as clean; each full keeps its
+# original floor-to-full span. Recalibrated 2026-10-17 for the slab-aware
+# detector (its tighter contours raised rounding/jag/wear on every card; the
+# old floors sat at or below the grade-10 median). See
+# test-artifacts/drift/raw_factors_train.csv. Note: none of these separates
+# grade 10 from grades 4-7 on slab photos - they are flags, not graders.
+_WHITE_FLOOR = 0.68
+_WHITE_FULL = 0.88
+_ROUND_FLOOR = 0.045
+_ROUND_FULL = 0.078
+_JAG_FLOOR = 0.030
+_JAG_FULL = 0.055
+_WEAR_FLOOR = 0.038
+_WEAR_FULL = 0.056
+_SURF_FLOOR = 15.0  # unchanged: no train cert reaches it
 _SURF_FULL = 30.0
 
 
