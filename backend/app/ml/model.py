@@ -48,8 +48,9 @@ class GradeModel(nn.Module):
         self.backbone = timm.create_model(backbone, pretrained=pretrained, num_classes=0)
         feat_dim = self.backbone.num_features
         self.dropout = nn.Dropout(dropout)
-        # CORN-style: a single linear layer producing K-1 logits whose
-        # cumulative probabilities are guaranteed monotonic via softplus.
+        # CORN-style: a single linear layer producing K-1 logits. Monotonic
+        # cumulative probabilities are enforced at decode time by the cummin
+        # in decode_corn_logits, not by this layer.
         self.fc = nn.Linear(feat_dim, NUM_THRESHOLDS)
 
     def _embed(self, x: torch.Tensor) -> torch.Tensor:
