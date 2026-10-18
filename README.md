@@ -62,6 +62,8 @@ cd PokeScan
 
 ### 2. Python environment
 
+> **Note:** `.venv` is currently near-empty; the working environment is the global pyenv Python 3.11.6 (with `pokescan` installed editable). Use plain `python` there until `intent/pinned-dev-environment` lands.
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
