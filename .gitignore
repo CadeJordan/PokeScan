@@ -6,6 +6,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 test-artifacts/
+graphify-out/cache/
 .ipynb_checkpoints/
 .env
 .env.local
