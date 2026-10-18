@@ -488,7 +488,7 @@ def _warp_to_canvas(bgr: np.ndarray, quad: np.ndarray) -> np.ndarray:
         [[0, 0], [CARD_W - 1, 0], [CARD_W - 1, CARD_H - 1], [0, CARD_H - 1]],
         dtype=np.float32,
     )
-    M = cv2.getPerspectiveTransform(quad, dst)
+    M = cv2.getPerspectiveTransform(quad, dst)  # noqa: N806
     return cv2.warpPerspective(bgr, M, (CARD_W, CARD_H))
 
 

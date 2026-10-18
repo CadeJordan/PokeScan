@@ -22,7 +22,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from backend.app.ml.model import GradeModel, NUM_THRESHOLDS, decode_corn_logits
+from backend.app.ml.model import GradeModel, decode_corn_logits
 
 FACTOR_NAMES = ("corners", "edges", "surface")
 

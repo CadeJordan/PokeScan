@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-import albumentations as A
+import albumentations as A  # noqa: N812
 import cv2
 import numpy as np
 import torch

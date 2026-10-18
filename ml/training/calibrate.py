@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass, field
 
 import numpy as np
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as F  # noqa: N812
 from torch.utils.data import DataLoader
 
 from backend.app.ml.model import NUM_GRADES, NUM_THRESHOLDS, GradeModel

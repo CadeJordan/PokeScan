@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 from functools import lru_cache
@@ -62,10 +63,8 @@ class Settings(BaseSettings):
         """
         sources: dict[str, str | None] = {}
         # .env values first (lowest precedence).
-        try:
+        with contextlib.suppress(OSError):
             sources.update(dotenv_values(PROJECT_ROOT / ".env"))
-        except OSError:
-            pass
         # Real env vars override.
         sources.update(os.environ)
 
