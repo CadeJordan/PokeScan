@@ -38,10 +38,8 @@ jobs:
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev]"
 
-      # Non-blocking until the existing ruff errors are cleaned up; remove continue-on-error then
       - name: Ruff
         run: ruff check . --output-format=github
-        continue-on-error: true
 
       # slow/model/visual need real data, exported weights, or write overlays; tests use synthetic cards
       - name: Pytest
@@ -68,9 +66,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # `next lint` was removed in Next 16, so call ESLint directly
       - name: ESLint
-        run: npx eslint src
+        run: npm run lint
 
       - name: Typecheck
         run: npx tsc --noEmit
