@@ -38,7 +38,9 @@ Known-good set (global env, 2026-10-17, 248 passed / 3 xfailed on the fast suite
 
 - **Fact:** venv contents, global versions and the passing test run, all checked 2026-10-17.
 - **Assumption:** the cu121 wheel for torch 2.5.1 is still downloadable from the PyTorch index.
-- **Assumption:** the frozen global env has no dependency conflicts that `pip check` would flag (not yet run).
+- **Fact (2026-10-18):** `python -m pip check` on the global env reports one conflict:
+  `opencv-contrib-python 4.13.0.92 has requirement numpy>=2; python_version >= "3.9", but you have numpy 1.26.4.`
+  `opencv-contrib-python` is pulled in by `mediapipe` (a global package, not in `pokescan[dev]`); `pokescan` pins `numpy<2.0` and `import cv2` currently resolves to 4.11.0 (`opencv-python`). So the conflict is outside our dependency closure. Exclude `opencv-contrib-python` / `mediapipe` when generating constraints, and expect `pip check` to be clean in the rebuilt `.venv`.
 
 ## Open questions
 
