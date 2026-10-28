@@ -1,13 +1,16 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+import localFont from "next/font/local";
 import { ReactQueryClientProvider } from "@/utils/react-query";
 import Navbar from "@/components/Navbar";
 import "./globals.css";
 
-const inter = Inter({
+// Self-hosted so the build doesn't fetch from Google Fonts (a failed fetch broke CI).
+// Inter v20 latin subset, variable 400–700, from fonts.gstatic.com; OFL licence alongside.
+const inter = localFont({
+	src: "./fonts/InterVariable-latin.woff2",
 	variable: "--font-geist-sans",
-	subsets: ["latin"],
-	weight: ["400", "500", "600", "700"],
+	weight: "400 700",
+	display: "swap",
 });
 
 export const metadata: Metadata = {
