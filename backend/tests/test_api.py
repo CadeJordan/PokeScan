@@ -90,6 +90,29 @@ def test_grade_503_when_model_not_loaded(client, fake_service, scene_jpeg):
     assert fake_service.calls == []
 
 
+def test_unloadable_probe_gives_503_and_health_says_why(
+    tmp_path, serve_env, tiny_legacy_onnx, scene_jpeg, monkeypatch
+):
+    # A real service with no probe files (a legacy model exists, opt-in off).
+    from fastapi.testclient import TestClient
+
+    import backend.app.api.grade as grade_mod
+    import backend.app.main as main_mod
+    from backend.app.ml.inference import GradeInferenceService
+
+    serve_env(ACTIVE_MODEL_PATH=tiny_legacy_onnx)
+    svc = GradeInferenceService(head_path=tmp_path / "grade_head.npz", features_path=tmp_path / "f.onnx")
+    monkeypatch.setattr(grade_mod, "get_inference_service", lambda: svc)
+    monkeypatch.setattr(main_mod, "get_inference_service", lambda: svc)
+    with TestClient(main_mod.create_app()) as c:
+        r = c.post("/api/grade", files=_files(scene_jpeg, scene_jpeg))
+        assert r.status_code == 503
+        assert "/api/health" in r.json()["detail"]
+        health = c.get("/api/health").json()
+    assert health["model_loaded"] is False
+    assert health["metadata"]["probe_load_error"] == "FileNotFoundError: grade_head.npz, f.onnx"
+
+
 def test_grade_500_on_inference_error(client, fake_service, scene_jpeg):
     fake_service.error = RuntimeError("onnx exploded")
     r = client.post("/api/grade", files=_files(scene_jpeg, scene_jpeg))

@@ -13,10 +13,18 @@ local, so these region means carry more grade signal than one global vector.
 
 `build_region_model` is used at training/export time (needs torch + timm);
 serving runs the exported ONNX graph through `FeatureExtractor`.
+
+`FEATURE_SPEC` fingerprints the feature definition. The training cache, the
+exported graph (its `card_features.json` sidecar) and the head metadata all
+record `feature_spec_hash()`, so artifacts built from different definitions
+are re-extracted, re-exported or refused at load instead of silently mixed.
 """
 
 from __future__ import annotations
 
+import datetime as dt
+import hashlib
+import json
 from pathlib import Path
 
 import cv2
@@ -46,6 +54,26 @@ CORNER_SLICE = slice(2, 6)
 EDGE_SLICE = slice(6, 10)
 CENTER_SLICE = slice(10, 11)
 GLOBAL_SLICE = slice(0, 2)
+
+# Bump "version" whenever to_input or region_means changes behaviour; the other
+# fields are the constants above.
+FEATURE_SPEC: dict = {
+    "backbone": BACKBONE,
+    "feat_h": FEAT_H,
+    "feat_w": FEAT_W,
+    "patch": PATCH,
+    "corner_patches": CORNER_PATCHES,
+    "edge_patches": EDGE_PATCHES,
+    "regions": list(REGION_NAMES),
+    "version": 1,
+}
+
+
+def feature_spec_hash() -> str:
+    """First 12 hex chars of the sha256 of FEATURE_SPEC (sorted-key JSON)."""
+    blob = json.dumps(FEATURE_SPEC, sort_keys=True).encode()
+    return hashlib.sha256(blob).hexdigest()[:12]
+
 
 _MEAN = np.array([0.485, 0.456, 0.406], np.float32)
 _STD = np.array([0.229, 0.224, 0.225], np.float32)
@@ -104,11 +132,15 @@ def build_region_model(pretrained: bool = True):
 
 
 def export_onnx(path: Path, pretrained: bool = True) -> None:
+    """Export the region model to `path`, plus a `.json` sidecar with the feature spec."""
     import torch
 
     model = build_region_model(pretrained)
     dummy = torch.zeros(2, 3, FEAT_H, FEAT_W)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Drop the old sidecar first, so a failure below never leaves it vouching for
+    # the new graph (serving then fails closed and train_probe re-exports).
+    path.with_suffix(".json").unlink(missing_ok=True)
     torch.onnx.export(
         model,
         dummy,
@@ -118,6 +150,12 @@ def export_onnx(path: Path, pretrained: bool = True) -> None:
         dynamic_axes={"image": {0: "n"}, "regions": {0: "n"}},
         opset_version=17,
     )
+    sidecar = {
+        "feature_spec": FEATURE_SPEC,
+        "feature_spec_hash": feature_spec_hash(),
+        "exported_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+    }
+    path.with_suffix(".json").write_text(json.dumps(sidecar, indent=2))
 
 
 class FeatureExtractor:

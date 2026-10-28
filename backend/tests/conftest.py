@@ -36,6 +36,54 @@ def model_path():
     return path
 
 
+@pytest.fixture(scope="session")
+def tiny_legacy_onnx(tmp_path_factory):
+    """A small ONNX graph with the legacy grade_model.onnx I/O contract."""
+    torch = pytest.importorskip("torch")
+    from backend.app.ml.preprocess import CARD_H, CARD_W
+
+    class Tiny(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.register_buffer("offsets", torch.linspace(4.0, -4.0, 9))
+
+        def forward(self, front, back):
+            shift = (front.mean((1, 2, 3)) - back.mean((1, 2, 3)))[:, None]
+            return shift + self.offsets[None]
+
+    path = tmp_path_factory.mktemp("legacy") / "grade_model.onnx"
+    x = torch.zeros(1, 3, CARD_H, CARD_W)
+    torch.onnx.export(
+        Tiny().eval(),
+        (x, x),
+        str(path),
+        input_names=["front", "back"],
+        output_names=["corn_logits"],
+        dynamic_axes={"front": {0: "n"}, "back": {0: "n"}, "corn_logits": {0: "n"}},
+        opset_version=17,
+    )
+    return path
+
+
+@pytest.fixture
+def serve_env(monkeypatch: pytest.MonkeyPatch):
+    """Inference reads fresh Settings from the environment; returns a setenv helper.
+
+    The legacy opt-in starts off, so tests don't depend on the developer's .env.
+    """
+    import backend.app.ml.inference as inference
+    from backend.app.core.config import Settings
+
+    monkeypatch.setattr(inference, "get_settings", Settings)
+    monkeypatch.setenv("ALLOW_LEGACY_MODEL", "0")
+
+    def set_env(**env: object) -> None:
+        for key, value in env.items():
+            monkeypatch.setenv(key, str(value))
+
+    return set_env
+
+
 # --------------------------------------------------------------------------- #
 # Fake inference service for API tests (no ONNX model needed)
 # --------------------------------------------------------------------------- #

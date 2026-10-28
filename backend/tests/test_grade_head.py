@@ -112,3 +112,35 @@ def test_check_feature_dim():
     head.check_feature_dim(D)
     with pytest.raises(ValueError, match="don't match"):
         head.check_feature_dim(D + 1)
+
+
+def test_feature_spec_hash_is_stable():
+    from backend.app.ml.features import feature_spec_hash
+
+    h = feature_spec_hash()
+    assert h == feature_spec_hash()
+    assert len(h) == 12 and int(h, 16) >= 0
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("backbone", "vit_small_patch14_dinov2.lvd142m"),
+        ("feat_h", 616),
+        ("feat_w", 448),
+        ("patch", 16),
+        ("corner_patches", 4),
+        ("edge_patches", 2),
+        ("regions", ["cls", "mean"]),
+        ("version", 2),
+    ],
+)
+def test_feature_spec_hash_changes_with_every_field(monkeypatch, field, value):
+    from backend.app.ml import features
+
+    assert set(features.FEATURE_SPEC) == {
+        "backbone", "feat_h", "feat_w", "patch", "corner_patches", "edge_patches", "regions", "version"
+    }
+    before = features.feature_spec_hash()
+    monkeypatch.setitem(features.FEATURE_SPEC, field, value)
+    assert features.feature_spec_hash() != before

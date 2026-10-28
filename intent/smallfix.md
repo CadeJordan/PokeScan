@@ -1,6 +1,6 @@
 # Small fixes
 
-Changes too small for their own spec. Each one should leave behaviour unchanged and keep the fast suite at its baseline: 398 passed / 2 xfailed (2026-10-23, after [[serve-input-normalization]] and its landscape-only retry fix; raise it as tests are added):
+Changes too small for their own spec. Each one should leave behaviour unchanged and keep the fast suite at its baseline: 500 passed / 2 xfailed (2026-10-27, after [[stable-grouped-split]], [[probe-artifact-consistency]], their tester-review fixes and the re-test suites; raise it as tests are added):
 `python -m pytest -m "not slow and not visual and not model"`
 
 ## 1. Lint baseline (ruff: 25 errors → 0)
@@ -88,3 +88,19 @@ Follow-ups from the [[serve-input-normalization]] review (2026-10-23; not done):
 - [ ] Square photos (`w == h`) are never retried: `preprocess.py:575` uses a strict `>`. Either list square photos under the spec's accepted cost, or use `>=` (no stored photo is square) and add a test pinning it.
 - [ ] The slow byte-identical test (`backend/tests/test_preprocess.py:393-400`) doesn't assert how many fallback faces it covers. Add `assert len(fallbacks) == 21` (or at least non-empty) so missing files can't make it check fewer, down to zero.
 - [ ] Cosmetic: 3 blank lines before `test_sideways_card_in_portrait_photo_is_not_retried` (`test_preprocess.py:210`).
+
+## 11. Split follow-ups (2026-10-27)
+
+From the [[stable-grouped-split]] implementation.
+
+- [x] `ml/data/collect.py:67` upserts `"split": None`, so re-scanning an already-collected PSA cert range resets those certs' `split` to NULL, and the next sticky split re-places them (a test cert can move). `ebay_collect` skips existing certs, so it isn't affected. Drop `split` from the row dict (and check `db.upsert` then leaves the column alone on conflict); add a `tmp_path` test that re-upserting a cert keeps its split.
+  - Done 2026-10-27. The base row is now built by a pure `collect._details_row(details)`, without `split`. A new cert gets the schema default (NULL), and `upsert_cert` only updates the keys in the row, so a re-scan keeps the split. Tests: `ml/tests/test_collect_rescan.py::test_rescan_keeps_assigned_split` (fresh cert NULL; `test`, crop and sub-grade columns survive a re-upsert) and `::test_details_row_omits_pipeline_owned_columns`. `ebay_collect` checks `cert_exists` before every upsert, so it still sends `"split": None` but only for new rows; left as is.
+  - Still open (not fixed): a PSA re-scan always rewrites `front_url`/`back_url`/`front_path`/`back_path`/`has_images`. If the images call returns nothing or a CDN download fails, an already-collected cert loses its image paths and drops to `has_images=0` (the files stay on disk). Its `cropped_*`/`crop_*`/`*_subgrade` survive but point at a cert the dataset no longer reads. When the downloads succeed, the images are re-downloaded and overwritten, so the crops and sub-grades can be stale relative to the new files. `collect` doesn't skip existing certs at all, so a re-scan also spends PSA quota on certs it already has. Fix: skip certs that are already collected with images, or on a failed fetch leave the image columns out of the row.
+
+## 12. Probe-artifact follow-ups (2026-10-27 re-test)
+
+From the re-test of [[probe-artifact-consistency]]; none is a bug, all fail in the safe direction or need hand-edited metadata.
+
+- [ ] `backend/app/ml/features.py` `export_onnx` deletes the old `card_features.json` before exporting. If `torch.onnx.export` then fails before writing anything (e.g. CUDA OOM on `--force-onnx`), the old graph, head and hash are still consistent, but the next API start fails closed on the missing sidecar. Write graph and sidecar to temp names and rename instead.
+- [ ] `backend/app/ml/inference.py` `_check_feature_spec` treats a falsy head hash (`""`, `null`) as a pre-spec head (WARNING and load) rather than failing closed. Only reachable with hand-edited or corrupt `grade_head.json`.
+- [ ] `_check_feature_spec` catches only JSON/Unicode errors when reading the sidecar; an OS-level read error fails closed even for a no-hash head, where the spec says such heads load "whatever the sidecar says". Safe direction; decide which the spec should say.

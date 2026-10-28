@@ -86,7 +86,8 @@ async def grade_card(
     if not service.ready:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="grade model not loaded - run `python -m ml.training.train_probe` first",
+            detail="grade model not loaded - see /api/health for the reason "
+            "(run `python -m ml.training.train_probe` if no model is trained)",
         )
     front_bytes = await _read_image(front, "front")
     back_bytes = await _read_image(back, "back")

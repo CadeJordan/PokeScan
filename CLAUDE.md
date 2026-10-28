@@ -15,7 +15,7 @@ Run all Python commands from `PokeScan/`. Modules are invoked as `python -m ...`
 Interpreter: `.venv` is currently near-empty. The working environment is the global pyenv Python 3.11.6, where `pokescan` is installed editable (torch 2.5.1+cu121). Use plain `python` and don't activate `.venv` until `intent/pinned-dev-environment` lands. Don't install or upgrade packages in the global env without asking.
 
 ```powershell
-# API (needs data/models/grade_head.npz + card_features.onnx (probe) or grade_model.onnx (legacy), else /api/grade returns 503)
+# API (needs data/models/grade_head.npz + card_features.onnx (probe), else /api/grade returns 503 and /api/health says why)
 uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000
 
 # Frontend (PokeScan/frontend; reads NEXT_PUBLIC_API_BASE from .env.local)
@@ -24,7 +24,7 @@ npm run preview    # Cloudflare runtime via OpenNext; npm run deploy to ship
 
 # Lint / tests (testpaths: backend/tests, ml/tests)
 ruff check .
-python -m pytest -m "not slow and not visual and not model"   # fast suite, ~2 min; baseline 398 passed, 2 xfailed
+python -m pytest -m "not slow and not visual and not model"   # fast suite, ~2 min; baseline 500 passed, 2 xfailed
 python -m pytest path/to/test_file.py::test_name
 # markers: slow (sweeps, full test-split eval), model (needs data/models/grade_model.onnx, else skips),
 #          visual (writes overlays to test-artifacts/overlays/)
@@ -32,13 +32,17 @@ python -m pytest path/to/test_file.py::test_name
 
 Data collection and the training pipeline (run in order: split → precrop → `python -m ml.training.train_probe`; the legacy CNN path is precompute_factors → train → export): see `README.md`. Evaluate models with card-grouped CV (`train_probe` does): 302 printed cards span the per-cert train/val/test split, so plain split numbers leak card identity.
 
-`smoke.yaml` is the fast end-to-end check (train → checkpoint → export → serve). Restart the API after exporting — the model is loaded once at startup.
+`split` is sticky: `python -m ml.data.split` only places unassigned certs and never moves an assigned one (check with `--dry-run`, which opens the DB read-only). `--reassign` (`--mode stratified` or `grouped`) rewrites existing assignments and resets every test number: it's a destructive action that needs the owner's explicit approval and a DB backup first.
+
+Test-set policy (decided 2026-10-27): the test split gives one final number per ADR. All model selection (hyperparameters, features, thresholds) uses card-grouped CV on train+val, never the test split.
+
+`smoke.yaml` is the fast end-to-end check (train → checkpoint → export → serve). It exports a legacy model; `ALLOW_LEGACY_MODEL=1` serves it only when no probe model loads, so to serve a freshly exported legacy model next to a working probe, pass its `model_path` or move the probe files aside. Restart the API after exporting — the model is loaded once at startup.
 
 ## Architecture
 
-**Inference path** (`backend/app/`): `api/grade.py` → `ml/inference.py` (`GradeInferenceService` singleton) → `ml/preprocess.py::detect_and_crop` (classical-CV quad detection + perspective warp to 600×840, with a padded fallback when no quad is found). The service loads the **probe model** when `data/models/grade_head.npz` and `card_features.onnx` both exist, else the **legacy** CORN `grade_model.onnx` (also forced by passing `model_path`).
+**Inference path** (`backend/app/`): `api/grade.py` → `ml/inference.py` (`GradeInferenceService` singleton) → `ml/preprocess.py::detect_and_crop` (classical-CV quad detection + perspective warp to 600×840, with a padded fallback when no quad is found). The service serves only the **probe model** (`data/models/grade_head.npz` + `card_features.onnx`) and fails closed: a missing file or a load error (corrupt, D mismatch, a `feature_spec_hash` in `grade_head.json` that differs from the running code's or from the `card_features.json` sidecar, or a missing sidecar beside such a head) leaves it not ready (503), with `probe_load_error` in `/api/health` metadata. The **legacy** CORN `grade_model.onnx` loads only with an explicit `model_path` or, as a fallback, with `ALLOW_LEGACY_MODEL=1`.
 
-**Probe model** (default, `ml/features.py` + `ml/grade_head.py`): frozen DINOv2-B (`card_features.onnx`, input 602×434) → per face 11 region vectors (CLS, mean, 4 corners, 4 edge strips, centre) → four proportional-odds probes (corners / edges / surface / global, both faces) → meta proportional-odds probe over their soft grades. Scaler+PCA are folded into each probe's weight vector, so the head is plain numpy. Trained by `python -m ml.training.train_probe` (`ml/training/probe.py` holds the fitting; card-grouped CV, nested OOF for the meta probe). Proportional odds is monotone by construction, so the CORN `cummin` question below doesn't apply to it.
+**Probe model** (default, `ml/features.py` + `ml/grade_head.py`): frozen DINOv2-B (`card_features.onnx`, input 602×434) → per face 11 region vectors (CLS, mean, 4 corners, 4 edge strips, centre) → four proportional-odds probes (corners / edges / surface / global, both faces) → meta proportional-odds probe over their soft grades. Scaler+PCA are folded into each probe's weight vector, so the head is plain numpy. Trained by `python -m ml.training.train_probe` (`ml/training/probe.py` holds the fitting; card-grouped CV, nested OOF for the meta probe). `features.FEATURE_SPEC` fingerprints the feature definition: bump its `version` whenever `to_input` or `region_means` changes, which invalidates the feature cache (also keyed on crop file size+mtime) and re-exports the graph. Proportional odds is monotone by construction, so the CORN `cummin` question below doesn't apply to it.
 
 **Sub-grades**: with the probe model, corners/edges/surface are the region probes' soft grades (learned from overall grade, not PSA sub-grades); otherwise classical CV from `ml/condition.py`, whose factors were measured to have ~zero correlation with grade. `ml/centering.py` measures border widths on both faces from colour runs and returns None for a face it can't measure (most full-art/silver/Japanese fronts) rather than guessing; the API notes it. The endpoint swallows sub-grade failures into `notes`, so a CV failure never fails the request. `ml/defects.py` (YOLO) and `ml/multitask.py` are Phase C hooks for the legacy CNN.
 

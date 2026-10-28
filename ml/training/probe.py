@@ -20,6 +20,7 @@ from backend.app.ml.grade_head import (
     OrdinalProbe,
     probe_input,
 )
+from ml.data.groups import card_group_key
 
 # Grouped-CV defaults, chosen on card-grouped 5-fold CV over train+val
 # (PCA 64/128/256 x L2 1e-3..3e-2 all land within ~0.01 MAE of each other).
@@ -94,7 +95,9 @@ def fit_ordinal_probe(
 
 def card_groups(brand: list[str], subject: list[str], number: list[str]) -> np.ndarray:
     """Group key per cert: the same printed card shares a key across certs."""
-    return np.array([f"{b}|{s}|{n}" for b, s, n in zip(brand, subject, number, strict=True)])
+    return np.array(
+        [card_group_key(b, s, n) for b, s, n in zip(brand, subject, number, strict=True)]
+    )
 
 
 def _folds(y: np.ndarray, groups: np.ndarray, n: int, seed: int):

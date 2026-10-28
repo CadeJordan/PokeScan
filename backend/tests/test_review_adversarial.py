@@ -195,18 +195,40 @@ def tiny_feature_onnx(tmp_path_factory):
     return path
 
 
-def test_selection_head_only_is_legacy(tmp_path):
+def test_selection_head_only_is_not_ready(tmp_path, serve_env, tiny_legacy_onnx):
+    serve_env(ACTIVE_MODEL_PATH=tiny_legacy_onnx)  # fails closed although a legacy model exists
     head = tmp_path / "h.npz"
     _head().save(head)
     svc = GradeInferenceService(
         head_path=head, features_path=tmp_path / "missing.onnx"
     )
-    assert svc.kind == "legacy"
+    assert not svc.ready
+    assert svc.metadata == {"probe_load_error": "FileNotFoundError: missing.onnx"}
 
 
-def test_selection_features_only_is_legacy(tmp_path, tiny_feature_onnx):
+def test_selection_head_only_with_legacy_opt_in_is_legacy(tmp_path, serve_env, tiny_legacy_onnx):
+    serve_env(ACTIVE_MODEL_PATH=tiny_legacy_onnx, ALLOW_LEGACY_MODEL=1)
+    head = tmp_path / "h.npz"
+    _head().save(head)
+    svc = GradeInferenceService(head_path=head, features_path=tmp_path / "missing.onnx")
+    assert svc.kind == "legacy" and svc.ready
+    assert svc.metadata["probe_load_error"] == "FileNotFoundError: missing.onnx"
+
+
+def test_selection_features_only_is_not_ready(tmp_path, tiny_feature_onnx, serve_env, tiny_legacy_onnx):
+    serve_env(ACTIVE_MODEL_PATH=tiny_legacy_onnx)
     svc = GradeInferenceService(head_path=tmp_path / "missing.npz", features_path=tiny_feature_onnx)
-    assert svc.kind == "legacy"
+    assert not svc.ready
+    assert svc.metadata == {"probe_load_error": "FileNotFoundError: missing.npz"}
+
+
+def test_selection_features_only_with_legacy_opt_in_is_legacy(
+    tmp_path, tiny_feature_onnx, serve_env, tiny_legacy_onnx
+):
+    serve_env(ACTIVE_MODEL_PATH=tiny_legacy_onnx, ALLOW_LEGACY_MODEL=1)
+    svc = GradeInferenceService(head_path=tmp_path / "missing.npz", features_path=tiny_feature_onnx)
+    assert svc.kind == "legacy" and svc.ready
+    assert svc.metadata["probe_load_error"] == "FileNotFoundError: missing.npz"
 
 
 def test_selection_both_is_probe_and_predicts(tmp_path, tiny_feature_onnx):
@@ -596,7 +618,7 @@ def test_served_features_match_training_cache(real_extractor):
     rng = np.random.default_rng(0)
     checked = 0
     for i in rng.choice(len(keys), 6, replace=False):
-        _, fp, bp = keys[i]
+        _, fp, bp = keys[i][:3]  # (cert, front, back, front sig, back sig)
         paths = [s.data_dir / fp, s.data_dir / bp]
         if not all(p.exists() for p in paths):
             continue
