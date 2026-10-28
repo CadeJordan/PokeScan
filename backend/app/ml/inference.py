@@ -1,26 +1,41 @@
 """ONNX Runtime inference for the grade model.
 
-Loads a single ONNX model on import; thread-safe for concurrent requests.
+Two model kinds, picked at load time:
+
+- probe (preferred): frozen DINOv2 region features (`card_features.onnx`) +
+  the linear ordinal head (`grade_head.npz`). See `features.py` and
+  `grade_head.py`; trained by `python -m ml.training.train_probe`.
+- legacy: the end-to-end ConvNeXt CORN model (`grade_model.onnx`) from
+  `python -m ml.training.export`. Used when an explicit `model_path` is given,
+  or when no probe artifacts exist.
+
+Thread-safe for concurrent requests.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
 
+import cv2
 import numpy as np
 import onnxruntime as ort
 
 from backend.app.core.config import get_settings
-from backend.app.ml.preprocess import CARD_H, CARD_W, detect_and_crop
+from backend.app.ml.preprocess import CARD_H, CARD_W, CardCrop, detect_and_crop, encode_jpeg
 
 log = logging.getLogger(__name__)
 
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+
+def _jpeg_roundtrip(rgb: np.ndarray) -> np.ndarray:
+    buf = np.frombuffer(encode_jpeg(rgb), np.uint8)
+    return cv2.cvtColor(cv2.imdecode(buf, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
 
 
 def _scale_brightness(rgb: np.ndarray, factor: float) -> np.ndarray:
@@ -46,31 +61,86 @@ class GradePrediction:
     rank_probs: list[float]  # cumulative P(grade > k) for k in 1..9
     found_quad_front: bool
     found_quad_back: bool
+    # Probe model only: soft grade suggested by each region group
+    # (corners / edges / surface / global), used for the sub-grades.
+    region_grades: dict[str, float] | None = None
+    # The (front, back) crops the grade was computed from, so callers (the
+    # centering and condition sub-grades) reuse them instead of detecting again.
+    # Not part of the prediction's value: left out of == and repr (big arrays).
+    crops: tuple[CardCrop, CardCrop] | None = field(default=None, compare=False, repr=False)
 
 
 class GradeInferenceService:
-    """Wraps an ONNX session + the preprocessing pipeline."""
+    """Wraps the model session(s) + the preprocessing pipeline."""
 
     def __init__(
-        self, model_path: Path | None = None, tta: bool | tuple[str, ...] = False
+        self,
+        model_path: Path | None = None,
+        tta: bool | tuple[str, ...] = False,
+        head_path: Path | None = None,
+        features_path: Path | None = None,
     ) -> None:
-        """``tta``: False (default, single pass), True (DEFAULT_TTA) or variant names.
+        """``model_path`` selects the legacy CORN ONNX model explicitly. Otherwise
+        the probe model (``head_path`` + ``features_path``, defaulting to the
+        settings) is used if both files exist, else the legacy active model.
 
-        With TTA the ONNX model runs once on a batch of variants and the
-        cumulative probabilities are averaged before decoding.
+        If the probe artifacts exist but can't be loaded (corrupt, or head and
+        feature model don't match), that is logged and the legacy model is used.
+
+        ``tta`` (legacy model only): False (default, single pass), True
+        (DEFAULT_TTA) or variant names. With TTA the ONNX model runs once on a
+        batch of variants and the cumulative probabilities are averaged.
         """
         settings = get_settings()
-        self.model_path = Path(model_path or settings.active_model_path)
         if tta is True:
             tta = DEFAULT_TTA
         unknown = set(tta or ()) - set(TTA_VARIANTS)
         if unknown:
             raise ValueError(f"unknown TTA variants: {sorted(unknown)}")
         self.tta: tuple[str, ...] = tuple(tta or ())
+        self.head_path = Path(head_path or settings.grade_head_path)
+        self.features_path = Path(features_path or settings.feature_model_path)
+        probe = model_path is None and self.head_path.exists() and self.features_path.exists()
+        self.kind = "legacy"
+        self.model_path = Path(model_path or settings.active_model_path)
         self._session: ort.InferenceSession | None = None
         self._meta: dict = {}
         self._lock = Lock()
+        if probe:
+            try:
+                self._load_probe()
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "could not load probe grade model %s + %s; falling back to legacy",
+                    self.head_path,
+                    self.features_path,
+                )
+                self._session, self._meta = None, {}
+            else:
+                self.kind, self.model_path = "probe", self.head_path
+                if self.tta:
+                    raise ValueError("TTA applies to the legacy model only")
+                return
         self._load()
+
+    def _load_probe(self) -> None:
+        from backend.app.ml.features import FeatureExtractor
+        from backend.app.ml.grade_head import GradeHead
+
+        extractor = FeatureExtractor(self.features_path)
+        head = GradeHead.load(self.head_path)
+        dim = extractor.session.get_outputs()[0].shape[-1]
+        if isinstance(dim, int):
+            head.check_feature_dim(dim)
+        self._extractor, self._head = extractor, head
+        self._session = extractor.session
+        self._meta = dict(head.metadata)
+        log.info(
+            "loaded probe grade model %s + %s (providers=%s)",
+            self.head_path,
+            self.features_path,
+            self._session.get_providers(),
+        )
 
     def _load(self) -> None:
         if not self.model_path.exists():
@@ -119,6 +189,8 @@ class GradeInferenceService:
         back_crop = detect_and_crop(back_bytes)
         if front_crop.image.shape[:2] != (CARD_H, CARD_W):
             raise RuntimeError("preprocessing produced wrong shape")
+        if self.kind == "probe":
+            return self._predict_probe(front_crop, back_crop)
 
         variants = self.tta or ("identity",)
         front_x = np.concatenate(
@@ -155,6 +227,27 @@ class GradeInferenceService:
             rank_probs=[float(p) for p in probs],
             found_quad_front=front_crop.found_quad,
             found_quad_back=back_crop.found_quad,
+            crops=(front_crop, back_crop),
+        )
+
+    def _predict_probe(self, front_crop: CardCrop, back_crop: CardCrop) -> GradePrediction:
+        from backend.app.ml.grade_head import decode
+
+        # Training read crops back from precrop's JPEGs; match that encoding.
+        front, back = (_jpeg_roundtrip(c.image) for c in (front_crop, back_crop))
+        with self._lock:
+            feats = self._extractor(front, back)
+        out = self._head(feats)
+        expected, hard, confidence, _ = decode(out.cum_probs)
+        return GradePrediction(
+            grade=expected,
+            grade_int=hard,
+            confidence=confidence,
+            rank_probs=[float(p) for p in out.cum_probs],
+            found_quad_front=front_crop.found_quad,
+            found_quad_back=back_crop.found_quad,
+            region_grades=out.region_grades,
+            crops=(front_crop, back_crop),
         )
 
 

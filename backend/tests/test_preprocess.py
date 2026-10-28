@@ -20,6 +20,7 @@ from backend.app.core.config import get_settings
 from backend.app.ml.preprocess import (
     CARD_H,
     CARD_W,
+    MAX_LONG_EDGE,
     _order_quad,
     detect_and_crop,
     encode_jpeg,
@@ -102,7 +103,10 @@ def test_detect_and_crop_accepts_input_types(kind):
     assert crop.image.dtype == np.uint8
     assert crop.found_quad
     assert crop.quad.shape == (4, 2)
-    assert crop.source_bgr.shape == scene.bgr.shape
+    if kind == "ndarray":
+        assert crop.source_bgr.shape == scene.bgr.shape
+    else:  # uploads are capped like ingest: 1200x1000 -> 1024 on the long edge
+        assert max(crop.source_bgr.shape[:2]) == 1024
 
 
 def test_png_bytes_with_alpha_are_accepted():
@@ -111,6 +115,110 @@ def test_png_bytes_with_alpha_are_accepted():
     Image.fromarray(rgba, "RGBA").save(buf, format="PNG")
     assert detect_and_crop(buf.getvalue()).found_quad
 
+
+# --------------------------------------------------------------------------- #
+# Upload normalisation (EXIF orientation, long-edge cap) and sideways retry
+# --------------------------------------------------------------------------- #
+_EXIF_ORIENTATION = 0x0112
+# Stored pixels for an upright photo under each EXIF orientation: the viewer
+# applies the inverse to display it upright (3: 180, 6: 90 CW, 8: 90 CCW).
+_STORED_FOR_ORIENTATION = {
+    3: lambda rgb: rgb[::-1, ::-1],
+    6: lambda rgb: np.rot90(rgb, 1),   # stored 90 CCW
+    8: lambda rgb: np.rot90(rgb, -1),  # stored 90 CW
+}
+
+
+def _ncc(a: np.ndarray, b: np.ndarray) -> float:
+    """Normalised cross-correlation of two equally sized images."""
+    x = a.astype(np.float64).ravel()
+    y = b.astype(np.float64).ravel()
+    x -= x.mean()
+    y -= y.mean()
+    return float(x @ y / (np.linalg.norm(x) * np.linalg.norm(y)))
+
+
+def _jpeg(rgb: np.ndarray, orientation: int | None = None) -> bytes:
+    exif = Image.Exif()
+    if orientation is not None:
+        exif[_EXIF_ORIENTATION] = orientation
+    buf = io.BytesIO()
+    Image.fromarray(np.ascontiguousarray(rgb)).save(buf, format="JPEG", quality=92, exif=exif)
+    return buf.getvalue()
+
+
+@pytest.fixture(scope="module")
+def upright_crop():
+    crop = detect_and_crop(_jpeg(bgr_to_rgb(make_scene(seed=0).bgr)))
+    assert crop.found_quad and crop.rotation == 0
+    return crop
+
+
+def test_max_long_edge_matches_ingest():
+    from ml.data.image_io import IMAGE_MAX_LONG_EDGE
+
+    assert MAX_LONG_EDGE == IMAGE_MAX_LONG_EDGE
+
+
+@pytest.mark.parametrize("orientation", [3, 6, 8])
+def test_exif_orientation_is_applied(orientation, upright_crop):
+    rgb = bgr_to_rgb(make_scene(seed=0).bgr)
+    crop = detect_and_crop(_jpeg(_STORED_FOR_ORIENTATION[orientation](rgb), orientation))
+    assert crop.found_quad
+    assert crop.rotation == 0  # upright after the transpose: no retry needed
+    assert _ncc(crop.image, upright_crop.image) >= 0.9
+
+
+def test_high_res_upload_is_capped():
+    scene = make_scene(seed=0, size=(3600, 3000))
+    crop = detect_and_crop(to_jpeg_bytes(scene.bgr))
+    assert crop.found_quad
+    assert max(crop.source_bgr.shape[:2]) == 1024
+    assert crop.scale == pytest.approx(1024 / 3600, rel=1e-3)
+
+
+def test_small_upload_is_not_resized():
+    crop = detect_and_crop(to_jpeg_bytes(make_scene(seed=0, size=(840, 700)).bgr))
+    assert crop.source_bgr.shape[:2] == (840, 700)
+    assert crop.scale == 1.0
+
+
+def test_numpy_input_is_not_normalised():
+    scene = make_scene(seed=0, size=(1500, 1250))
+    crop = detect_and_crop(bgr_to_rgb(scene.bgr))
+    assert crop.found_quad
+    assert crop.source_bgr.shape == scene.bgr.shape
+    assert crop.scale == 1.0
+
+
+def test_sideways_upload_is_found_by_retry(upright_crop):
+    sideways = cv2.rotate(make_scene(seed=0).bgr, cv2.ROTATE_90_CLOCKWISE)
+    crop = detect_and_crop(to_jpeg_bytes(sideways))
+    assert crop.found_quad
+    assert crop.rotation == 90
+    # The retry turns the photo portrait again, and the quad, contour and
+    # source are all in that rotated frame.
+    assert crop.source_bgr.shape[0] > crop.source_bgr.shape[1]
+    assert crop.quad[:, 0].max() < crop.source_bgr.shape[1]
+    assert crop.quad[:, 1].max() < crop.source_bgr.shape[0]
+    # Which way up the card ends is not this retry's job (face-side guard).
+    ncc = max(_ncc(crop.image, upright_crop.image), _ncc(crop.image, upright_crop.image[::-1, ::-1]))
+    assert ncc >= 0.9
+
+
+
+def test_sideways_card_in_portrait_photo_is_not_retried():
+    # Only landscape photos are retried: on upright portrait slab photos the
+    # rotated search finds false quads (inner panels of full-art cards). The
+    # accepted cost is that a sideways card inside a portrait photo falls back.
+    sideways = cv2.rotate(make_scene(seed=0).bgr, cv2.ROTATE_90_CLOCKWISE)  # 1000x1200
+    h, w = sideways.shape[:2]
+    pad = (w + 200 - h) // 2
+    portrait = cv2.copyMakeBorder(sideways, pad, pad, 0, 0, cv2.BORDER_REPLICATE)
+    assert portrait.shape[0] > portrait.shape[1]
+    crop = detect_and_crop(to_jpeg_bytes(portrait))
+    assert not crop.found_quad
+    assert crop.rotation == 0
 
 def test_rejects_non_rgb_array():
     with pytest.raises(ValueError):
@@ -239,6 +347,65 @@ def test_warp_reproduces_card(condition):
     ).mean()
     assert diff < 12, f"mean abs diff {diff:.1f}"
     assert diff < flipped and diff < upside_down
+
+
+# --------------------------------------------------------------------------- #
+# Real data: upload normalisation is a no-op on the training photos
+# --------------------------------------------------------------------------- #
+@pytest.mark.slow
+def test_stored_precrops_are_reproduced_byte_identical():
+    """Stored photos are upright and 1024 px, so serving reproduces precrop exactly.
+
+    Checks a random sample of test-split faces plus every stored fallback face
+    (`crop_found_* = 0`, any split): those are where a retry could find a new
+    (false) quad and change the crop. Reads only: the DB is opened read-only
+    and nothing is written.
+    """
+    import sqlite3
+
+    s = get_settings()
+    if not s.db_path.exists():
+        pytest.skip("no DB")
+    conn = sqlite3.connect(f"file:{s.db_path.resolve().as_posix()}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT front_path, cropped_front_path, back_path, cropped_back_path FROM certs "
+            "WHERE split='test' AND has_images=1 AND cropped_front_path IS NOT NULL "
+            "AND cropped_back_path IS NOT NULL ORDER BY cert_number"
+        ).fetchall()
+        fallback_rows = conn.execute(
+            "SELECT front_path, cropped_front_path, back_path, cropped_back_path, "
+            "crop_found_front, crop_found_back FROM certs "
+            "WHERE has_images=1 AND (crop_found_front=0 OR crop_found_back=0) "
+            "ORDER BY cert_number"
+        ).fetchall()
+    finally:
+        conn.close()
+    faces = [
+        (s.data_dir / raw, s.data_dir / crop)
+        for fp, fc, bp, bc in rows
+        for raw, crop in ((fp, fc), (bp, bc))
+        if raw and (s.data_dir / raw).exists() and (s.data_dir / crop).exists()
+    ]
+    if len(faces) < 50:
+        pytest.skip(f"only {len(faces)} test faces with a stored precrop")
+    picks = [faces[i] for i in np.random.default_rng(0).choice(len(faces), 50, replace=False)]
+    fallbacks = [
+        (s.data_dir / raw, s.data_dir / crop)
+        for fp, fc, bp, bc, ff, fb in fallback_rows
+        for raw, crop, found in ((fp, fc, ff), (bp, bc, fb))
+        if found == 0 and raw and crop
+        and (s.data_dir / raw).exists() and (s.data_dir / crop).exists()
+    ]
+    picks += [f for f in fallbacks if f not in picks]
+    mismatched = []
+    for raw, crop in picks:
+        result = detect_and_crop(raw.read_bytes())
+        if encode_jpeg(result.image) != crop.read_bytes():
+            mismatched.append(raw.name)
+        elif (raw, crop) in fallbacks:
+            assert not result.found_quad and result.rotation == 0, raw.name
+    assert not mismatched, f"{len(mismatched)}/{len(picks)} differ: {mismatched}"
 
 
 # --------------------------------------------------------------------------- #

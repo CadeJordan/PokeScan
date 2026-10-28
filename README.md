@@ -6,27 +6,30 @@ This project is independent and not affiliated with PSA or eBay. Respect each pl
 
 ## What it does
 
-1. **Detect & dewarp** — finds the card in the photo (including slab shots) and warps it to a 600×840 canvas.
-2. **Overall grade** — dual-input ConvNeXt-Tiny + CORN ordinal regression over front and back images.
-3. **Sub-grades** — classical computer vision (no extra labels required):
-   - **Centering** — inner art-frame ratios mapped to PSA tolerances.
-   - **Corners** — factory-cut sharpness and fraying from the original card contour.
-   - **Edges** — boundary roughness (wear) and rim whitening.
-   - **Surface** — strong linear defects (scratches / creases) isolated from the artwork.
-
-Both sides are analyzed; the **worse side** sets each condition sub-grade (PSA-style).
+1. **Detect & dewarp** — normalises the upload like the training photos (upright per its EXIF orientation, at most 1024 px on the long edge), finds the card in the photo (including slab shots) and warps it to a 600×840 canvas. If no card outline is found in a landscape photo, it retries once with the photo turned 90°, so a sideways shot is still found (possibly upside down). Portrait photos aren't retried, since the turned search finds false outlines on them, so a sideways card inside a portrait photo isn't found. Failing that, the whole photo is padded onto the canvas and the response notes it.
+2. **Region features** — a frozen DINOv2 ViT-B (self-supervised, not fine-tuned) summarises each face as 11 vectors: CLS, mean, 4 corners, 4 edge strips, centre.
+3. **Overall grade** — linear proportional-odds (ordinal) probes over the corner, edge, centre and global features of both faces, stacked into one ordinal model.
+4. **Sub-grades**:
+   - **Corners / edges / surface** — the soft grade each region probe gives on its own. They are learned from overall PSA grades (no sub-grade labels exist), so read them as "what this region suggests", not PSA's own sub-grade.
+   - **Centering** — classical CV: border widths from colour runs, mapped to PSA tolerances (front 60/40 for a 10; back 75/25). Reports nothing for a face whose borders it can't find reliably rather than guessing.
 
 ## Architecture
 
 ```
 Front/back image
   -> card detector (classical CV)
-  -> ConvNeXt backbone + CORN head -> {grade, confidence}
-  -> centering CV        -> centering subgrade
-  -> condition CV         -> corners / edges / surface subgrades
+  -> DINOv2-B region features (ONNX)       -> 2 x 11 x 768
+  -> corner / edge / surface / global probes -> region soft grades -> sub-grades
+  -> meta ordinal probe                     -> {grade, confidence, rank_probs}
+  -> centering CV (both faces)              -> centering subgrade
 ```
 
-Longer-term, the condition sub-grades can be replaced by trained multi-task heads (`backend/app/ml/multitask.py`) without changing the API.
+Why not the end-to-end CNN any more: with ~2.6k labelled certs (87% grade 9–10),
+fine-tuning ConvNeXt end to end collapsed towards a constant grade and scored
+below "always predict 10". Frozen features + linear probes can't collapse that
+way, refit in seconds, and the per-region probes give sub-grades that actually
+track the grade. The legacy CNN path (`grade_model.onnx`) still loads when no
+probe model is present. See `docs/adr/0001-frozen-features-linear-probes.md`.
 
 ## Repo layout
 
@@ -120,7 +123,7 @@ NEXT_PUBLIC_API_BASE=http://localhost:8000/api
 
 ## Run the app
 
-You need an exported ONNX model before `/grade` works. If none exists yet, skip to [Train a model](#train-a-model) or the health check will report `model_loaded: false`.
+You need a trained model (`python -m ml.training.train_probe`) before `/grade` works. If none exists yet, skip to [Train a model](#train-a-model) or the health check will report `model_loaded: false`.
 
 ### 1. Start the API
 
@@ -221,7 +224,28 @@ Resume from where a token stopped (use the logged cert number as the next start 
 
 ## Train a model
 
-### MVP (overall grade only)
+### Probe model (default)
+
+```powershell
+python -m ml.data.split
+python -m ml.data.precrop                 # one-time dewarp to data/crops/
+python -m ml.training.train_probe         # features -> grouped CV -> fit -> test -> export
+```
+
+`train_probe` extracts DINOv2 region features for every cert whose front and
+back outlines were found (cached in `data/models/cache/region_feats.npz`, so
+refits after the first run take a minute), reports card-grouped 5-fold CV on
+train+val (certs of the same printed card never straddle folds), fits the head
+on train+val, evaluates once on test, and writes:
+
+- `data/models/grade_head.npz` + `grade_head.json` (weights, metrics; served as `/api/health` metadata)
+- `data/models/card_features.onnx` (the frozen feature extractor; `--force-onnx` to re-export)
+- `test-artifacts/eval/probe_report.json`
+
+Restart the API afterwards. The rest of this section is the legacy end-to-end
+CNN, which the API only uses when the two probe files are absent.
+
+### Legacy CNN: MVP (overall grade only)
 
 ```powershell
 python -m ml.data.split
@@ -230,7 +254,7 @@ python -m ml.training.train --config ml/training/configs/mvp.yaml
 python -m ml.training.export --checkpoint data/models/checkpoints/best-XX.ckpt
 ```
 
-### Multi-task (grade + corners/edges/surface)
+### Legacy CNN: multi-task (grade + corners/edges/surface)
 
 Classical-CV pseudo-labels from the condition module supervise auxiliary factor
 heads alongside the CORN grade head. The API still serves factor sub-grades from
@@ -352,7 +376,9 @@ The report includes 95% bootstrap CIs for MAE, QWK, exact and bias, plus a
 per-grade table with a Wilson CI on recall and a bootstrap CI on MAE. Low
 grades with a handful of test cards show very wide intervals; don't read much
 into them. `--tta` only affects the evaluation; the API default is unchanged
-(`GradeInferenceService(tta=True)` turns it on in code).
+(`GradeInferenceService(tta=True)` turns it on in code). TTA applies to the
+legacy CNN only: with the probe model it raises an error rather than being
+silently ignored, so pass `--model-path` to evaluate the legacy model with it.
 
 **Raw (unslabbed) cards.** Every training photo is through PSA plastic. Before
 trusting the model on raw cards, build a separate labelled set (e.g. from eBay
