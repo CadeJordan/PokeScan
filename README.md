@@ -245,7 +245,7 @@ python -m ml.data.collect_all `
 
 Resume from where a token stopped (use the logged cert number as the next start for that slot).
 
-Both skip certs already collected with images, without any PSA call (the log says how many). Certs stored without images are fetched again. `--refresh` re-fetches every cert in the range; it spends quota and re-downloads the images. Careful: if a cert's images call (or an image download) fails during a refresh, that cert's image columns (`front_url`/`back_url`, `front_path`/`back_path`, `has_images`) are cleared, the same as on a first collection. The image files on disk stay, and a later run without `--refresh` fetches the cert again.
+Both skip certs already collected with images, without any PSA call (the log says how many). Certs stored without images are fetched again. `--refresh` re-fetches every cert in the range; it spends quota and re-downloads the images. Careful: a failure during a refresh overwrites what was stored, the same as on a first collection. If a cert's images call fails, its image columns (`front_url`/`back_url`, `front_path`/`back_path`, `has_images`) are cleared; if only one image download fails, that face's path and `has_images` are reset. The image files on disk stay, and a later run without `--refresh` fetches the cert again.
 
 ## Train a model
 

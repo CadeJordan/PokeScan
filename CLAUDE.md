@@ -24,7 +24,7 @@ npm run preview    # Cloudflare runtime via OpenNext; npm run deploy to ship
 
 # Lint / tests (testpaths: backend/tests, ml/tests)
 ruff check .
-python -m pytest -m "not slow and not visual and not model"   # fast suite, ~2.5 min; baseline 616 passed, 2 xfailed
+python -m pytest -m "not slow and not visual and not model"   # fast suite, ~2.5 min; baseline 663 passed, 2 xfailed
 python -m pytest path/to/test_file.py::test_name
 # markers: slow (sweeps, full test-split eval), model (needs data/models/grade_model.onnx, else skips),
 #          visual (writes overlays to test-artifacts/overlays/)
