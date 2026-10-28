@@ -23,6 +23,21 @@ _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 
+def _scale_brightness(rgb: np.ndarray, factor: float) -> np.ndarray:
+    return np.clip(rgb.astype(np.float32) * factor, 0, 255).astype(np.uint8)
+
+
+# Test-time augmentation variants (applied to the cropped RGB card). Only
+# condition-preserving changes: mirror + mild exposure. Off by default.
+TTA_VARIANTS = {
+    "identity": lambda im: im,
+    "hflip": lambda im: np.ascontiguousarray(im[:, ::-1]),
+    "dim": lambda im: _scale_brightness(im, 0.9),
+    "bright": lambda im: _scale_brightness(im, 1.1),
+}
+DEFAULT_TTA = ("identity", "hflip", "dim", "bright")
+
+
 @dataclass(slots=True)
 class GradePrediction:
     grade: float           # soft expected grade in [1, 10]
@@ -36,9 +51,22 @@ class GradePrediction:
 class GradeInferenceService:
     """Wraps an ONNX session + the preprocessing pipeline."""
 
-    def __init__(self, model_path: Path | None = None) -> None:
+    def __init__(
+        self, model_path: Path | None = None, tta: bool | tuple[str, ...] = False
+    ) -> None:
+        """``tta``: False (default, single pass), True (DEFAULT_TTA) or variant names.
+
+        With TTA the ONNX model runs once on a batch of variants and the
+        cumulative probabilities are averaged before decoding.
+        """
         settings = get_settings()
         self.model_path = Path(model_path or settings.active_model_path)
+        if tta is True:
+            tta = DEFAULT_TTA
+        unknown = set(tta or ()) - set(TTA_VARIANTS)
+        if unknown:
+            raise ValueError(f"unknown TTA variants: {sorted(unknown)}")
+        self.tta: tuple[str, ...] = tuple(tta or ())
         self._session: ort.InferenceSession | None = None
         self._meta: dict = {}
         self._lock = Lock()
@@ -92,17 +120,23 @@ class GradeInferenceService:
         if front_crop.image.shape[:2] != (CARD_H, CARD_W):
             raise RuntimeError("preprocessing produced wrong shape")
 
-        front_x = self._to_tensor(front_crop.image)
-        back_x = self._to_tensor(back_crop.image)
+        variants = self.tta or ("identity",)
+        front_x = np.concatenate(
+            [self._to_tensor(TTA_VARIANTS[v](front_crop.image)) for v in variants]
+        )
+        back_x = np.concatenate(
+            [self._to_tensor(TTA_VARIANTS[v](back_crop.image)) for v in variants]
+        )
 
         with self._lock:
             outputs = self._session.run(
                 ["corn_logits"],
                 {"front": front_x, "back": back_x},
             )
-        logits = outputs[0][0]  # (K-1,)
+        logits = outputs[0]  # (V, K-1)
         probs = 1.0 / (1.0 + np.exp(-logits))
-        probs = np.minimum.accumulate(probs)  # enforce monotonicity
+        probs = np.minimum.accumulate(probs, axis=1)  # enforce monotonicity
+        probs = probs.mean(axis=0)  # average over TTA variants (V=1 without TTA)
         hard_rank = int(1 + (probs > 0.5).sum())
         expected = float(1.0 + probs.sum())
 

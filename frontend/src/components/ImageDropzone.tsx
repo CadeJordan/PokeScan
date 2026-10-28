@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 type Props = {
   label: string;
@@ -18,19 +18,19 @@ const ImageDropzone = ({
   accept = "image/*",
 }: Props) => {
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const [preview, setPreview] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
 
-  useEffect(() => {
-    if (!file) {
-      setPreview(null);
-      return;
-    }
-    const url = URL.createObjectURL(file);
-    setPreview(url);
-    return () => URL.revokeObjectURL(url);
-  }, [file]);
+  // Each attached <img> owns its object URL and revokes it on detach (React 19 ref cleanup).
+  const previewRef = useCallback(
+    (img: HTMLImageElement | null) => {
+      if (!img || !file) return;
+      const url = URL.createObjectURL(file);
+      img.src = url;
+      return () => URL.revokeObjectURL(url);
+    },
+    [file],
+  );
 
   const acceptFile = useCallback(
     (f: File | undefined | null) => {
@@ -83,18 +83,18 @@ const ImageDropzone = ({
         className={`group relative flex aspect-[5/7] cursor-pointer items-center justify-center overflow-hidden rounded-lg border bg-white/[0.02] transition-colors ${
           isDragging
             ? "border-zinc-300 bg-white/[0.04]"
-            : preview
+            : file
               ? "border-white/[0.10]"
               : "border-dashed border-white/[0.10] hover:border-white/25 hover:bg-white/[0.04]"
         }`}
       >
         <CornerMarks />
 
-        {preview ? (
+        {file ? (
           <>
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src={preview}
+              ref={previewRef}
               alt={`${label} preview`}
               className="relative h-full w-full object-contain"
             />

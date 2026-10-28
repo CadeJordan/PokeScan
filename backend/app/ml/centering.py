@@ -37,8 +37,8 @@ class CenteringResult:
     @property
     def lr_ratio(self) -> tuple[int, int]:
         total = max(1, self.left + self.right)
-        l = round(self.left / total * 100)
-        return l, 100 - l
+        left = round(self.left / total * 100)
+        return left, 100 - left
 
     @property
     def tb_ratio(self) -> tuple[int, int]:

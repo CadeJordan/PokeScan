@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 import pytorch_lightning as pl
 import torch
 from torch.optim import AdamW
@@ -14,7 +15,56 @@ from backend.app.ml.multitask import FACTOR_NAMES, MultiTaskGradeModel, multi_ta
 from ml.training.metrics import exact_match, mean_absolute_error, off_by_one
 
 
-class GradeLightningModule(pl.LightningModule):
+class _EpochQWKMixin:
+    """Accumulates hard predictions over an epoch and logs ``{stage}/qwk``.
+
+    QWK is not decomposable over batches, so it is computed once at epoch end
+    from all val/test predictions (single-process; with DDP each rank would
+    log its own shard).
+    """
+
+    _QWK_STAGES = ("val", "test")
+
+    def _qwk_reset(self, stage: str) -> None:
+        if not hasattr(self, "_qwk_buf"):
+            self._qwk_buf: dict[str, tuple[list, list]] = {}
+        self._qwk_buf[stage] = ([], [])
+
+    def _qwk_accumulate(self, stage: str, pred: torch.Tensor, grade: torch.Tensor) -> None:
+        if stage not in self._QWK_STAGES:
+            return
+        if stage not in getattr(self, "_qwk_buf", {}):
+            self._qwk_reset(stage)
+        preds, grades = self._qwk_buf[stage]
+        preds.append(pred.detach().long().cpu())
+        grades.append(grade.detach().long().cpu())
+
+    def _qwk_log(self, stage: str) -> None:
+        from ml.eval.evaluate import quadratic_weighted_kappa
+
+        preds, grades = getattr(self, "_qwk_buf", {}).get(stage, ([], []))
+        if not preds:
+            return
+        qwk = quadratic_weighted_kappa(torch.cat(grades).numpy(), torch.cat(preds).numpy())
+        if np.isnan(qwk):
+            qwk = 0.0
+        self.log(f"{stage}/qwk", float(qwk), prog_bar=(stage == "val"))
+        self._qwk_reset(stage)
+
+    def on_validation_epoch_start(self) -> None:
+        self._qwk_reset("val")
+
+    def on_validation_epoch_end(self) -> None:
+        self._qwk_log("val")
+
+    def on_test_epoch_start(self) -> None:
+        self._qwk_reset("test")
+
+    def on_test_epoch_end(self) -> None:
+        self._qwk_log("test")
+
+
+class GradeLightningModule(_EpochQWKMixin, pl.LightningModule):
     def __init__(
         self,
         backbone: str = "convnext_tiny",
@@ -57,6 +107,7 @@ class GradeLightningModule(pl.LightningModule):
                  on_step=False, on_epoch=True)
         self.log(f"{stage}/off_by_one", off_by_one(out.predicted_grade, grade),
                  on_step=False, on_epoch=True)
+        self._qwk_accumulate(stage, out.predicted_grade, grade)
         return loss
 
     def training_step(self, batch: dict, _idx: int) -> torch.Tensor:
@@ -78,7 +129,7 @@ class GradeLightningModule(pl.LightningModule):
         return {"optimizer": opt, "lr_scheduler": sched}
 
 
-class MultiTaskGradeLightningModule(pl.LightningModule):
+class MultiTaskGradeLightningModule(_EpochQWKMixin, pl.LightningModule):
     """Grade + corner/edge/surface heads trained with classical-CV pseudo-labels."""
 
     def __init__(
@@ -129,6 +180,7 @@ class MultiTaskGradeLightningModule(pl.LightningModule):
 
         decoded = decode_corn_logits(out.grade_logits)
         grade = batch["grade"]
+        self._qwk_accumulate(stage, decoded.predicted_grade, grade)
         self.log(
             f"{stage}/mae",
             mean_absolute_error(decoded.predicted_grade, grade),
