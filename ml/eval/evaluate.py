@@ -5,6 +5,7 @@ CORN decode) on raw front/back photos and writes a JSON report plus charts.
 
     python -m ml.eval.evaluate --split test
     python -m ml.eval.evaluate --split test --limit 50 --no-robustness
+    python -m ml.eval.evaluate --split test --perturbations rotate_180,swap_faces
     python -m ml.eval.evaluate --split test --save-baseline   # pin current numbers
     python -m ml.eval.evaluate --split test --tta              # + test-time augmentation
     python -m ml.eval.evaluate --manifest data/raw_eval/manifest.csv   # raw-card set
@@ -17,7 +18,8 @@ Metrics
 - per grade: support, recall, MAE, bias; confusion matrix; 9-vs-10 band
 - calibration: ECE, reliability bins, accuracy vs. coverage
 - pipeline: card-quad found rate, MAE split by quad found vs. fallback
-- robustness: MAE delta / grade-flip rate under blur, JPEG, rotation, lighting
+- robustness: MAE delta / grade-flip rate under blur, JPEG, rotation, lighting,
+  and swapped front/back uploads (`--perturbations` picks a subset)
 - speed: p50 / p95 latency per front+back pair
 - baselines: majority-grade and train-mean predictors
 """
@@ -241,6 +243,37 @@ PERTURBATIONS: dict[str, Callable[[np.ndarray], np.ndarray]] = {
     "rotate_180": lambda im: cv2.rotate(im, cv2.ROTATE_180),
 }
 
+# Perturbations of the (front, back) upload pair, on the raw bytes.
+PAIR_PERTURBATIONS: dict[str, Callable[[bytes, bytes], tuple[bytes, bytes]]] = {
+    "swap_faces": lambda front, back: (back, front),
+}
+ALL_PERTURBATIONS: tuple[str, ...] = (*PERTURBATIONS, *PAIR_PERTURBATIONS)
+
+
+def parse_perturbations(text: str | None) -> list[str] | None:
+    """Comma list of perturbation names -> list (None or blank -> None, i.e. all).
+
+    Raises ValueError naming any unknown perturbation and the known ones.
+    """
+    if text is None or not text.strip():
+        return None
+    names = [n.strip() for n in text.split(",") if n.strip()]
+    unknown = [n for n in names if n not in ALL_PERTURBATIONS]
+    if unknown:
+        raise ValueError(
+            f"unknown perturbation(s) {', '.join(unknown)}; known: {', '.join(ALL_PERTURBATIONS)}"
+        )
+    return list(dict.fromkeys(names))  # drop repeats, keep order
+
+
+def apply_perturbation(name: str, front: bytes, back: bytes) -> tuple[bytes, bytes]:
+    """Perturbed (front, back) upload bytes: a pair perturbation, or an image one per face."""
+    if name in PAIR_PERTURBATIONS:
+        return PAIR_PERTURBATIONS[name](front, back)
+    fn = PERTURBATIONS[name]
+    f, b = (_encode(fn(cv2.imdecode(np.frombuffer(x, np.uint8), cv2.IMREAD_COLOR))) for x in (front, back))
+    return f, b
+
 
 def _encode(bgr: np.ndarray) -> bytes:
     ok, buf = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
@@ -336,20 +369,25 @@ def load_manifest(path: Path, limit: int | None = None) -> list[Sample]:
     return out[:limit] if limit else out
 
 
-def predict_all(service, samples: list[Sample], perturb=None, progress: bool = True) -> dict:
+def predict_all(
+    service, samples: list[Sample], perturb: str | None = None, progress: bool = True
+) -> dict:
+    """Predict every sample; `perturb` names an entry of ALL_PERTURBATIONS to apply first."""
     from tqdm import tqdm
 
-    rows = {k: [] for k in ("grade", "pred_int", "pred_soft", "confidence", "quad_front", "quad_back", "latency", "crop_kind")}
-    it = tqdm(samples, desc=perturb[0] if perturb else "eval", disable=not progress)
+    keys = ("cert", "grade", "pred_int", "pred_soft", "confidence", "quad_front", "quad_back",
+            "latency", "crop_kind", "notes")
+    rows = {k: [] for k in keys}
+    it = tqdm(samples, desc=perturb or "eval", disable=not progress)
     for s in it:
         front, back = s.front.read_bytes(), s.back.read_bytes()
         if perturb is not None:
-            fn = perturb[1]
-            front = _encode(fn(cv2.imdecode(np.frombuffer(front, np.uint8), cv2.IMREAD_COLOR)))
-            back = _encode(fn(cv2.imdecode(np.frombuffer(back, np.uint8), cv2.IMREAD_COLOR)))
+            front, back = apply_perturbation(perturb, front, back)
         t0 = time.perf_counter()
         p = service.predict(front, back)
         rows["latency"].append(time.perf_counter() - t0)
+        rows["cert"].append(s.cert)
+        rows["notes"].append("; ".join(getattr(p, "notes", None) or []))
         rows["grade"].append(s.grade)
         rows["pred_int"].append(p.grade_int)
         rows["pred_soft"].append(p.grade)
@@ -413,6 +451,19 @@ def build_report(
         },
         "baselines": baselines(true, train_grades),
     }
+    if "cert" in rows:
+        # Per cert, so two runs can be compared cert by cert.
+        notes = rows.get("notes", [""] * len(true))
+        report["predictions"] = [
+            {
+                "cert": str(c),
+                "grade": int(g),
+                "pred_int": int(i),
+                "pred_soft": float(f),
+                **({"notes": str(n)} if n else {}),
+            }
+            for c, g, i, f, n in zip(rows["cert"], true, pi, ps, notes, strict=True)
+        ]
     return report
 
 
@@ -421,13 +472,18 @@ def robustness(service, samples: list[Sample], clean_rows: dict, names: list[str
     clean_mae = float(np.abs(clean_rows["pred_int"][:n] - clean_rows["grade"][:n]).mean())
     out = {}
     for name in names:
-        rows = predict_all(service, samples, perturb=(name, PERTURBATIONS[name]))
+        rows = predict_all(service, samples, perturb=name)
+        notes = rows.get("notes")
         out[name] = {
             "n": n,
             "mae": float(np.abs(rows["pred_int"] - rows["grade"]).mean()),
             "mae_delta": float(np.abs(rows["pred_int"] - rows["grade"]).mean() - clean_mae),
             "grade_flip_rate": float((rows["pred_int"] != clean_rows["pred_int"][:n]).mean()),
             "mean_abs_soft_shift": float(np.abs(rows["pred_soft"] - clean_rows["pred_soft"][:n]).mean()),
+            "n_with_notes": int(sum(bool(x) for x in notes)) if notes is not None else 0,
+            # Per cert, in the order of report["predictions"][:n].
+            "pred_int": [int(v) for v in rows["pred_int"]],
+            "pred_soft": [round(float(v), 4) for v in rows["pred_soft"]],
         }
     return out
 
@@ -592,7 +648,10 @@ def run_evaluation(
         "providers": service._session.get_providers(),
     }
     if robustness_limit and perturbations is not False:
-        names = perturbations or list(PERTURBATIONS)
+        names = perturbations or list(ALL_PERTURBATIONS)
+        unknown = [n for n in names if n not in ALL_PERTURBATIONS]
+        if unknown:
+            raise ValueError(f"unknown perturbation(s): {', '.join(unknown)}")
         report["robustness"] = robustness(service, samples[:robustness_limit], rows, names)
     return report
 
@@ -622,6 +681,11 @@ def main(
     limit: int | None = typer.Option(None, help="Cap number of cards."),
     robustness_limit: int = typer.Option(100, help="Cards used per perturbation (0 disables)."),
     no_robustness: bool = typer.Option(False, help="Skip the perturbation runs."),
+    perturbations: str | None = typer.Option(
+        None,
+        help="Comma list of perturbations to run (default: all of "
+        + ", ".join(ALL_PERTURBATIONS) + ").",
+    ),
     model_path: Path | None = typer.Option(None, help="Override ONNX model path."),
     out_dir: Path = typer.Option(DEFAULT_OUT, help="Where to write report.json and charts."),
     save_baseline: bool = typer.Option(False, help="Pin these numbers as the regression baseline."),
@@ -640,10 +704,15 @@ def main(
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     if save_baseline and (manifest is not None or tta):
         raise typer.BadParameter("--save-baseline only pins a plain DB split (no --manifest / --tta)")
+    try:
+        names = parse_perturbations(perturbations)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--perturbations") from exc
     report = run_evaluation(
         split=split,
         limit=limit,
         robustness_limit=0 if no_robustness else robustness_limit,
+        perturbations=names,
         model_path=model_path,
         manifest=manifest,
         tta=tta,

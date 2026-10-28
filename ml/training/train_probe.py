@@ -95,6 +95,9 @@ def extract_features(
     cache: Path,
     batch: int = 8,
     model_factory=build_region_model,
+    transform=None,
+    variant: str = "",
+    save: bool = True,
 ) -> np.ndarray:
     """(N, 2, n_regions, D) float32 features, reusing cached certs whose crop files are unchanged.
 
@@ -102,6 +105,11 @@ def extract_features(
     the crop file's "size:mtime_ns", so a rewritten crop is re-extracted. The
     whole cache is discarded when it was built from another feature spec, and
     only the current rows' entries are saved back.
+
+    `transform` (RGB -> RGB) is applied to each crop before `to_input`; a cache
+    of transformed crops must name it in `variant` (e.g. "rot180"), which the
+    cache records and must match like the feature spec. `save=False` reads the
+    cache but never writes it (missing certs are still extracted).
     """
     import torch
 
@@ -110,14 +118,18 @@ def extract_features(
     if cache.exists():
         with np.load(cache, allow_pickle=False) as z:
             have = str(z["feature_spec_hash"]) if "feature_spec_hash" in z.files else None
-            if have == spec_hash:
+            have_variant = str(z["variant"]) if "variant" in z.files else ""
+            if have == spec_hash and have_variant == variant:
                 cached = dict(zip(map(tuple, z["keys"]), z["feats"], strict=True))
             else:
                 log.info(
-                    "feature cache %s has feature_spec_hash %s, not %s: re-extracting every cert",
+                    "feature cache %s has feature_spec_hash %s variant %r, not %s %r: "
+                    "re-extracting every cert",
                     cache,
                     have,
+                    have_variant,
                     spec_hash,
+                    variant,
                 )
     keys = [
         (
@@ -138,21 +150,24 @@ def extract_features(
             for s in tqdm(range(0, len(todo), batch), desc="features"):
                 idx = todo[s : s + batch]
                 imgs = [
-                    to_input(_read_rgb(data_dir / keys[i][side]))
+                    to_input(transform(rgb) if transform else rgb)
                     for i in idx
                     for side in (1, 2)
+                    for rgb in (_read_rgb(data_dir / keys[i][side]),)
                 ]
                 out = model(torch.from_numpy(np.stack(imgs)).to(device)).float().cpu().numpy()
                 for j, i in enumerate(idx):
                     cached[keys[i]] = out[2 * j : 2 * j + 2].astype(np.float16)
-    if todo or set(cached) != set(keys):
+    if save and (todo or set(cached) != set(keys)):
         # Save the current rows only: entries for dropped certs or old crops go.
         cache.parent.mkdir(parents=True, exist_ok=True)
+        extra = {"variant": np.array(variant)} if variant else {}
         np.savez(
             cache,
             feature_spec_hash=np.array(spec_hash),
             keys=np.array(keys),
             feats=np.stack([cached[k] for k in keys]),
+            **extra,
         )
     return np.stack([cached[k] for k in keys]).astype(np.float32)
 
