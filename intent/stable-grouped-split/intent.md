@@ -148,3 +148,10 @@ All tests build their own DB in `tmp_path` via `ml.data.db.connect`. None of the
 - **Salt stays `pokescan-split-v1`.** The 47 test certs graded ≤8 (simulated 49–61) are accepted; trying other salts until the test set looks nicer would be choosing the test set by hand.
 - **No tolerance on the new metrics**: the test set and the fit set both change. Sanity check only: card-grouped CV MAE within ±0.02 of 0.4467 (CV is already card-grouped, so it should barely move); stop and report if it doesn't.
 - The new ADR (`docs/adr/0002-card-grouped-test-split.md`) becomes the baseline [[face-side-orientation-guard]] measures against.
+
+## Owner decisions (2026-10-27, round 3, after the first phase-2 attempt)
+
+- **First attempt stopped on the sanity check and was rolled back.** Grouped-split CV MAE was 0.4694 (+0.0227 over 0.4467). The DB and `data/models` were restored from the backups above.
+- **Fact:** the 0.4467 reference was one CV seed. Card-grouped 5-fold CV over seeds 0/1/2 gives 0.4467 / 0.4552 / 0.4534 (mean **0.4518**) on the old fit set, and 0.4694 / 0.4668 / 0.4610 (mean 0.4657) on the grouped fit set. The ~0.014 gap matches the changed card population; the bug signals (straddle 0, row counts, `split_legacy`) were clean.
+- **Sanity check re-referenced** to the 3-seed mean: grouped 3-seed CV MAE mean within **±0.02 of 0.4518**; stop and report if it isn't. ADR 0002 records the 3-seed CV means for both fit sets beside the single-seed numbers.
+- **Commit `ml/eval/baseline.json`** (written by `evaluate --save-baseline`) so later specs compare against a tracked file.
