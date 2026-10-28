@@ -195,18 +195,20 @@ class GradeInferenceService:
     def _load_guard(self, dim: int | None) -> None:
         """Load the face guard if `face_guard.npz` sits next to the head.
 
-        Fails open: any problem (unreadable file, wrong width, a
-        `feature_spec_hash` in `face_guard.json` that is missing, unreadable or not
-        the code's) leaves no guard, logs a WARNING and records
-        `face_guard_load_error`; grading is then exactly as without a guard.
+        Fails open: any problem (an error importing the guard or stat-ing its file,
+        an unreadable file, a wrong weight shape or width, a bad bias or threshold,
+        a `feature_spec_hash` in `face_guard.json` that is missing, unreadable or
+        not the code's) leaves no guard, logs a WARNING and records
+        `face_guard_load_error`; grading is then exactly as without a guard. Nothing
+        here may make the probe unready.
         """
-        from backend.app.ml.face_guard import FaceGuard
-        from backend.app.ml.features import feature_spec_hash
-
         path = self.face_guard_path
-        if not path.exists():
-            return
         try:
+            from backend.app.ml.face_guard import FaceGuard
+            from backend.app.ml.features import feature_spec_hash
+
+            if not path.exists():
+                return
             sidecar = path.with_suffix(".json")
             if not sidecar.exists():
                 raise ValueError(f"{sidecar.name} missing")
@@ -396,8 +398,17 @@ class GradeInferenceService:
         with self._lock:
             feats = self._extractor(front, back)
         notes: list[str] = []
+        decision = None
         if self._guard is not None:
-            decision = self._guard.decide(feats)
+            try:
+                decision = self._guard.decide(feats)
+            except Exception:  # noqa: BLE001 - a bad guard never fails the request
+                log.warning(
+                    "face guard %s failed on this request; graded it unguarded",
+                    self.face_guard_path,
+                    exc_info=True,
+                )
+        if decision is not None:
             notes = list(decision.notes)
             if decision.swap:
                 front_crop, back_crop = back_crop, front_crop

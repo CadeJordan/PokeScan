@@ -1,7 +1,7 @@
 """Re-test of 419a2d4: rot180 feature cache, guard training leakage, evaluate.
 
 tmp_path and synthetic data only; nothing under data/ is read or written.
-Known defects are `xfail(strict=True)`.
+The defects found here (once strict xfails) are fixed; the tests now pass.
 """
 
 from __future__ import annotations
@@ -164,11 +164,23 @@ def test_image_perturbation_reencodes_both_faces_and_pair_one_does_not(tmp_path)
     assert ev.apply_perturbation("swap_faces", front, back) == (back, front)
 
 
-def test_parse_perturbations_with_only_commas_means_all():
+@pytest.mark.parametrize("text", [" , ,", ",", "   ", " ,	, "])
+def test_parse_perturbations_with_no_name_is_refused_like_an_unknown_name(text):
+    """Only commas/whitespace used to parse to [] and run every perturbation."""
     import ml.eval.evaluate as ev
 
-    # [] reaches run_evaluation, whose `perturbations or ALL` runs every perturbation.
-    assert not ev.parse_perturbations(" , ,")
+    with pytest.raises(ValueError, match=r"unknown perturbation\(s\) .*; known: blur"):
+        ev.parse_perturbations(text)
+
+
+def test_cli_turns_a_perturbation_list_with_no_name_into_a_usage_error(monkeypatch):
+    from typer.testing import CliRunner
+
+    import ml.eval.evaluate as ev
+
+    monkeypatch.setattr(ev, "run_evaluation", lambda **kw: pytest.fail("must not evaluate"))
+    result = CliRunner().invoke(ev.app, ["--perturbations", " , ,"])
+    assert result.exit_code == 2
 
 
 def _patched_eval(tmp_path, monkeypatch, found):
@@ -203,12 +215,6 @@ def test_report_per_cert_fields_and_notes(tmp_path, monkeypatch):
     assert rob["pred_int"] == [p["pred_int"] for p in preds] and rob["n_with_notes"] == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="evaluate.robustness: per-cert pred_int is documented as 'in the order of "
-    "report[\"predictions\"][:n]', but with exclude_fallback the predictions drop fallback "
-    "certs while robustness runs on samples[:n] unfiltered, so the lists no longer line up",
-)
 def test_robustness_per_cert_lists_line_up_with_predictions_under_exclude_fallback(
     tmp_path, monkeypatch
 ):
@@ -217,3 +223,24 @@ def test_robustness_per_cert_lists_line_up_with_predictions_under_exclude_fallba
     certs = [p["cert"] for p in r["predictions"]]
     rob = r["robustness"]["swap_faces"]
     assert len(rob["pred_int"]) == len(certs)
+    assert certs == ["1", "2"] and rob["cert"] == certs and rob["n"] == 2
+    assert rob["pred_int"] == [p["pred_int"] for p in r["predictions"]]
+
+
+def test_robustness_cert_list_names_each_entry_without_exclude_fallback(tmp_path, monkeypatch):
+    ev = _patched_eval(tmp_path, monkeypatch, [False, True, True])
+    r = ev.run_evaluation(progress=False, n_boot=0, perturbations=["swap_faces"], robustness_limit=2)
+    rob = r["robustness"]["swap_faces"]
+    assert rob["cert"] == ["0", "1"] == [p["cert"] for p in r["predictions"][:2]]
+    assert rob["n"] == len(rob["pred_int"]) == len(rob["pred_soft"]) == 2
+
+
+def test_robustness_refuses_clean_rows_of_other_certs(tmp_path, monkeypatch):
+    ev = _patched_eval(tmp_path, monkeypatch, [True, True, True])
+    samples = ev.load_samples("test")
+    import backend.app.ml.inference as inference
+
+    svc = inference.GradeInferenceService()
+    clean = ev.predict_all(svc, samples[1:], progress=False)
+    with pytest.raises(ValueError, match="not the same certs"):
+        ev.robustness(svc, samples[:2], clean, ["swap_faces"])

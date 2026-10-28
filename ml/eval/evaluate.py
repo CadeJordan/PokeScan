@@ -251,14 +251,16 @@ ALL_PERTURBATIONS: tuple[str, ...] = (*PERTURBATIONS, *PAIR_PERTURBATIONS)
 
 
 def parse_perturbations(text: str | None) -> list[str] | None:
-    """Comma list of perturbation names -> list (None or blank -> None, i.e. all).
+    """Comma list of perturbation names -> list (None or "" -> None, i.e. all).
 
-    Raises ValueError naming any unknown perturbation and the known ones.
+    Raises ValueError naming any unknown perturbation and the known ones. Text
+    with no name in it (only commas and whitespace) raises the same error rather
+    than silently meaning "all".
     """
-    if text is None or not text.strip():
+    if text is None or text == "":
         return None
     names = [n.strip() for n in text.split(",") if n.strip()]
-    unknown = [n for n in names if n not in ALL_PERTURBATIONS]
+    unknown = [n for n in names if n not in ALL_PERTURBATIONS] if names else [repr(text)]
     if unknown:
         raise ValueError(
             f"unknown perturbation(s) {', '.join(unknown)}; known: {', '.join(ALL_PERTURBATIONS)}"
@@ -468,7 +470,17 @@ def build_report(
 
 
 def robustness(service, samples: list[Sample], clean_rows: dict, names: list[str]) -> dict:
+    """Run each perturbation on `samples` and compare with `clean_rows[:n]`.
+
+    `clean_rows` must hold the same certs as `samples`, in the same order: the
+    clean run of exactly these certs (run_evaluation passes the certs the report's
+    metrics cover, so under exclude_fallback the fallback certs are left out of
+    both).
+    """
     n = len(samples)
+    certs = [str(s.cert) for s in samples]
+    if "cert" in clean_rows and [str(c) for c in clean_rows["cert"][:n]] != certs:
+        raise ValueError("robustness: clean rows and samples are not the same certs in the same order")
     clean_mae = float(np.abs(clean_rows["pred_int"][:n] - clean_rows["grade"][:n]).mean())
     out = {}
     for name in names:
@@ -481,7 +493,9 @@ def robustness(service, samples: list[Sample], clean_rows: dict, names: list[str
             "grade_flip_rate": float((rows["pred_int"] != clean_rows["pred_int"][:n]).mean()),
             "mean_abs_soft_shift": float(np.abs(rows["pred_soft"] - clean_rows["pred_soft"][:n]).mean()),
             "n_with_notes": int(sum(bool(x) for x in notes)) if notes is not None else 0,
-            # Per cert, in the order of report["predictions"][:n].
+            # Per cert, in the order of `cert` (= report["predictions"][:n], since
+            # run_evaluation runs robustness on the certs the predictions list).
+            "cert": certs,
             "pred_int": [int(v) for v in rows["pred_int"]],
             "pred_soft": [round(float(v), 4) for v in rows["pred_soft"]],
         }
@@ -631,12 +645,17 @@ def run_evaluation(
 
     rows = predict_all(service, samples, progress=progress)
     report = build_report(rows, train_grades, n_boot=n_boot)
+    # The certs the metrics (and report["predictions"]) cover; robustness runs on
+    # the first robustness_limit of these.
+    metric_samples, metric_rows = samples, rows
     if exclude_fallback:
         both_found = rows["quad_front"] & rows["quad_back"]
         if not both_found.any():
             raise RuntimeError("every card fell back; nothing left to evaluate")
         pipeline = report["pipeline"]
-        report = build_report(filter_rows(rows, both_found), train_grades, n_boot=n_boot)
+        metric_rows = filter_rows(rows, both_found)
+        metric_samples = [s for s, keep in zip(samples, both_found, strict=True) if keep]
+        report = build_report(metric_rows, train_grades, n_boot=n_boot)
         report["pipeline"] = {**pipeline, "excluded_from_metrics": int((~both_found).sum())}
     report["meta"] = {
         "split": split,
@@ -652,7 +671,15 @@ def run_evaluation(
         unknown = [n for n in names if n not in ALL_PERTURBATIONS]
         if unknown:
             raise ValueError(f"unknown perturbation(s): {', '.join(unknown)}")
-        report["robustness"] = robustness(service, samples[:robustness_limit], rows, names)
+        # Robustness runs on the certs the metrics cover, not on every loaded
+        # sample: under exclude_fallback the fallback certs are dropped here too.
+        # That keeps every existing robustness field's meaning - `n` certs, MAE and
+        # flips against the clean run of those same certs, per-cert lists in the
+        # order of report["predictions"][:n] - rather than redefining the lists as
+        # "samples[:n], fallback certs included". `cert` names each entry.
+        report["robustness"] = robustness(
+            service, metric_samples[:robustness_limit], metric_rows, names
+        )
     return report
 
 

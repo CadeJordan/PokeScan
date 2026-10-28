@@ -83,15 +83,30 @@ class FaceGuard:
     def side_threshold(self) -> float:
         return self.thresholds["side"]
 
-    def check_feature_dim(self, dim: int) -> None:
-        """Raise ValueError unless every probe fits `dim`-wide region features."""
-        want = 2 * dim
+    def check_feature_dim(self, dim: int | None) -> None:
+        """Raise ValueError unless every probe is valid for `dim`-wide region features.
+
+        Each weight must be 1-D with shape (2*dim,) (any length when `dim` is None),
+        each bias a finite scalar, each threshold finite and in (0.5, 1): a lower
+        side threshold lets "looks back" and "looks front" overlap, and a flip
+        threshold at or below 0.5 rotates faces the probe is unsure about.
+        """
         for name in CHECKS:
-            if self.probes[name].weight.size != want:
+            w = np.asarray(self.probes[name].weight)
+            if w.ndim != 1:
+                raise ValueError(f"face guard probe {name!r} has weight shape {w.shape}; need 1-D")
+            if dim is not None and w.shape != (2 * dim,):
                 raise ValueError(
-                    f"face guard probe {name!r} has {self.probes[name].weight.size} weights; "
-                    f"{dim}-dim features need {want}"
+                    f"face guard probe {name!r} has {w.size} weights; "
+                    f"{dim}-dim features need {2 * dim}"
                 )
+            if not np.isfinite(w).all():
+                raise ValueError(f"face guard probe {name!r} has non-finite weights")
+            if not _finite_scalar(self.probes[name].bias):
+                raise ValueError(f"face guard probe {name!r} bias {self.probes[name].bias!r} is not finite")
+            t = self.thresholds[name]
+            if not _finite_scalar(t) or not 0.5 < t < 1.0:
+                raise ValueError(f"face guard threshold {name!r} {t!r} is not in (0.5, 1)")
 
     def p_back(self, feats: np.ndarray) -> np.ndarray:
         """(2, n_regions, D) [front, back] features -> (2,) P(back) per row."""
@@ -136,8 +151,16 @@ class FaceGuard:
         return flip, notes, (float(p[0]), float(p[1]))
 
     def decide(self, feats: np.ndarray) -> GuardDecision:
-        """Side check, then the orientation check on the (possibly swapped) rows."""
+        """Side check, then the orientation check on the (possibly swapped) rows.
+
+        When both rows read as the same side (a "both photos look like" note), the
+        orientation check is skipped: it isn't known which upright probe applies to
+        which face, and the front probe fires on upright backs (5.5% at its
+        threshold), so a rotation there would be a guess.
+        """
         swap, notes, p_back = self.check_sides(feats)
+        if notes and not swap:  # same-side pair: note only
+            return GuardDecision(False, (False, False), notes, p_back, None)
         rows = feats[::-1] if swap else feats
         flip, flip_notes, p_flip = self.check_orientation(rows)
         return GuardDecision(swap, flip, notes + flip_notes, p_back, p_flip)
@@ -166,11 +189,11 @@ class FaceGuard:
         with np.load(path, allow_pickle=False) as z:
             probes = {
                 n: LogisticProbe(
-                    weight=z[f"{n}.weight"].astype(np.float64), bias=float(z[f"{n}.bias"])
+                    weight=z[f"{n}.weight"].astype(np.float64), bias=_scalar(z, f"{n}.bias")
                 )
                 for n in CHECKS
             }
-            thresholds = {n: float(z[f"{n}.threshold"]) for n in CHECKS}
+            thresholds = {n: _scalar(z, f"{n}.threshold") for n in CHECKS}
         metadata: dict = {}
         meta_path = path.with_suffix(".json")
         if meta_path.exists():
@@ -182,9 +205,23 @@ class FaceGuard:
         enabled = metadata.get("enabled_checks", [])
         if not isinstance(enabled, list) or not set(enabled) <= set(CHECKS):
             raise ValueError(f"{meta_path.name}: enabled_checks {enabled!r} is not a list of {CHECKS}")
-        return cls(
+        guard = cls(
             probes=probes,
             thresholds=thresholds,
             enabled=tuple(n for n in CHECKS if n in enabled),
             metadata={k: v for k, v in metadata.items() if k not in ("enabled_checks", "thresholds")},
         )
+        guard.check_feature_dim(None)  # shapes, finiteness, threshold range; width checked later
+        return guard
+
+
+def _finite_scalar(v) -> bool:
+    return isinstance(v, (int, float, np.floating, np.integer)) and bool(np.isfinite(v))
+
+
+def _scalar(z, key: str) -> float:
+    """A 0-d numeric array from the npz as a float; ValueError for any other shape."""
+    a = z[key]
+    if a.shape != () or a.dtype.kind not in "iuf":
+        raise ValueError(f"{key} has shape {a.shape} / dtype {a.dtype}; need a numeric scalar")
+    return float(a)

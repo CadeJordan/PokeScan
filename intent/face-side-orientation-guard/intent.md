@@ -52,6 +52,7 @@ Measured 2026-10-23 with the served probe model (see [[cv-ml-improvement-plan]] 
      - If the front row reads as a back and the back row as a front (both beyond `side_threshold`), swap the feature rows and the crops, and add the note `"front and back photos looked swapped; graded them the other way round"`.
      - If both rows read as the same side with confidence, add the note `"both photos look like card backs"` (or fronts) and don't swap.
   2. **Orientation check.** On the possibly swapped rows, compute P(flipped) for each face with its probe. For each face over `flip_threshold`:
+     - 2026-10-28 (tester finding): skipped for a same-side pair (step 1's "both photos look like" note, which stays): which probe applies to which face is unknown, and the front probe fires on 5.5% of upright backs.
      - rotate that face's crop image 180°;
      - re-run the extractor once on the (possibly rotated) pair, after the same `_jpeg_roundtrip` as today;
      - add the note `"front photo was upside down; rotated it"` (or back).

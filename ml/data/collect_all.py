@@ -140,7 +140,9 @@ def main(
     refresh: bool = typer.Option(
         False,
         "--refresh",
-        help="Re-fetch certs already collected with images (default: skip them).",
+        help="Re-fetch certs already collected with images (default: skip them). "
+        "Warning: if a cert's images call fails during a refresh, its image columns "
+        "are cleared, as on a first collection (the files on disk stay).",
     ),
 ) -> None:
     start_list = _parse_int_list(starts)

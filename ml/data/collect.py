@@ -280,7 +280,9 @@ def main(
         False,
         "--refresh",
         help="Re-fetch certs already collected with images (spends quota and "
-        "re-downloads their images). By default they are skipped.",
+        "re-downloads their images). By default they are skipped. Warning: if a "
+        "cert's images call fails during a refresh, its image columns are cleared, "
+        "as on a first collection (the files on disk stay).",
     ),
 ) -> None:
     asyncio.run(

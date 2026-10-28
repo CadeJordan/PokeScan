@@ -245,7 +245,7 @@ python -m ml.data.collect_all `
 
 Resume from where a token stopped (use the logged cert number as the next start for that slot).
 
-Both skip certs already collected with images, without any PSA call (the log says how many). Certs stored without images are fetched again. `--refresh` re-fetches every cert in the range; it spends quota and re-downloads the images.
+Both skip certs already collected with images, without any PSA call (the log says how many). Certs stored without images are fetched again. `--refresh` re-fetches every cert in the range; it spends quota and re-downloads the images. Careful: if a cert's images call (or an image download) fails during a refresh, that cert's image columns (`front_url`/`back_url`, `front_path`/`back_path`, `has_images`) are cleared, the same as on a first collection. The image files on disk stay, and a later run without `--refresh` fetches the cert again.
 
 ## Train a model
 
@@ -293,7 +293,12 @@ rewriting it), extracts features of every precrop rotated 180° into
 picks each probe's threshold from card-grouped 5-fold CV on train+val: the
 lowest of 0.9 / 0.95 / 0.99 whose false-positive rate on correctly placed,
 upright faces is at most 0.2%. A check that misses its gate (side: CV error
-≤ 0.3% and AUC ≥ 0.999; upright: AUC ≥ 0.99) is stored but disabled. Writes
+≤ 0.3% and AUC ≥ 0.999; upright: AUC ≥ 0.99), or for which no threshold in
+{0.9, 0.95, 0.99} meets FPR ≤ 0.2%, is stored but disabled. The shipped guard
+(2026-10-28) has `back_upright` disabled for that reason, so only swapped
+photos and upside-down fronts are corrected; an upside-down back is graded as
+uploaded. A pair whose photos both read as backs (or both as fronts) gets a
+note and no rotation. Writes
 `data/models/face_guard.npz` + `face_guard.json` (enabled checks, thresholds,
 CV and test metrics, `feature_spec_hash`) and
 `test-artifacts/eval/face_guard_report.json`.

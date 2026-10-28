@@ -1,7 +1,7 @@
 """Re-test of 419a2d4 (face guard) and 7cb97c5 (smallfix 12 export): adversarial cases.
 
 Synthetic features, hand-built guards and tmp_path artifacts only; nothing
-under data/ is read or written. Known defects are `xfail(strict=True)`.
+under data/ is read or written. The defects found here (once strict xfails) are fixed; the tests now pass.
 """
 
 from __future__ import annotations
@@ -199,12 +199,6 @@ def test_explicit_legacy_model_ignores_a_guard_file(tmp_path, serve_env, tiny_le
     assert "face_guard" not in svc.metadata and "face_guard_load_error" not in svc.metadata
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="inference.py:_load_guard runs `path.exists()` (and the FaceGuard import) outside its "
-    "try: an OSError other than not-found from that stat propagates to _load_probe, so the "
-    "probe fails closed (503) because of the guard",
-)
 def test_guard_stat_error_never_makes_the_probe_unready(probe_files, serve_env, monkeypatch):
     head_path, feat_path = _probe_ready(probe_files)
     _save_guard(head_path)
@@ -221,12 +215,6 @@ def test_guard_stat_error_never_makes_the_probe_unready(probe_files, serve_env, 
     assert "face_guard_load_error" in svc.metadata
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="FaceGuard.check_feature_dim compares weight.size, not shape: a (1, 2D) weight passes "
-    "the load check, then every /api/grade fails with a matmul ValueError (500) instead of the "
-    "guard failing open at load",
-)
 def test_guard_weight_of_wrong_shape_fails_open_at_load(probe_files, serve_env, pair):
     head_path, feat_path = _probe_ready(probe_files)
     path = _save_guard(head_path)
@@ -242,18 +230,24 @@ def test_guard_weight_of_wrong_shape_fails_open_at_load(probe_files, serve_env, 
     assert svc._guard is None and "face_guard_load_error" in svc.metadata
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="FaceGuard.load doesn't validate thresholds: a side threshold below 0.5 makes "
-    "'looks back' and 'looks front' overlap, so an unsure pair (P(back) 0.5 / 0.5) is swapped",
-)
-def test_side_threshold_below_half_is_refused(tmp_path):
-    guard = _guard(thresholds={"side": 0.4, "front_upright": 0.9, "back_upright": 0.9})
+def test_side_threshold_below_half_is_refused(tmp_path, probe_files, serve_env, pair):
+    """A side threshold below 0.5 makes 'looks back' and 'looks front' overlap, so an
+    unsure pair (P(back) 0.5 / 0.5) would be swapped: load refuses it, and the
+    service fails open (no guard, so no swap)."""
+    thresholds = {"side": 0.4, "front_upright": 0.9, "back_upright": 0.9}
+    guard = _guard(thresholds=thresholds)
     path = tmp_path / "face_guard.npz"
     guard.save(path)
-    loaded = FaceGuard.load(path)
-    swap, _, _ = loaded.check_sides(_feats(side=(0.0, 0.0)))
-    assert not swap
+    with pytest.raises(ValueError, match=r"threshold 'side' 0\.4 is not in \(0\.5, 1\)"):
+        FaceGuard.load(path)
+    head_path, feat_path = _probe_ready(probe_files)
+    _guard(thresholds=thresholds, metadata={"feature_spec_hash": feature_spec_hash()}).save(
+        head_path.with_name("face_guard.npz")
+    )
+    svc = _ready_service(head_path, feat_path)
+    _assert_fails_open(svc, "is not in (0.5, 1)")
+    svc._extractor = SeqExtractor(_feats(side=(0.0, 0.0)))
+    assert svc.predict(*pair).notes == []
 
 
 def test_save_load_keeps_float64_weights(tmp_path):
@@ -263,6 +257,126 @@ def test_save_load_keeps_float64_weights(tmp_path):
     loaded = FaceGuard.load(tmp_path / "g.npz")
     assert loaded.probes["side"].weight.dtype == np.float64
     np.testing.assert_array_equal(loaded.probes["side"].weight, w)
+
+
+@pytest.mark.parametrize(
+    "problem, expected",
+    [
+        ("bias_not_a_scalar", "side.bias has shape (1,)"),
+        ("bias_nan", "bias nan is not finite"),
+        ("threshold_nan", "threshold 'front_upright' nan is not in (0.5, 1)"),
+        ("threshold_one", "threshold 'back_upright' 1.0 is not in (0.5, 1)"),
+        ("threshold_half", "threshold 'side' 0.5 is not in (0.5, 1)"),
+        ("threshold_a_string", "side.threshold has shape () / dtype <U"),
+        ("weight_inf", "non-finite weights"),
+        ("weight_2d", "has weight shape (2, 8); need 1-D"),
+    ],
+)
+def test_bad_weights_biases_and_thresholds_fail_open_at_load(probe_files, serve_env, pair, problem, expected):
+    head_path, feat_path = _probe_ready(probe_files)
+    path = _save_guard(head_path)
+    with np.load(path) as z:
+        arrays = {k: z[k] for k in z.files}
+    if problem == "bias_not_a_scalar":
+        arrays["side.bias"] = np.array([0.0])
+    elif problem == "bias_nan":
+        arrays["front_upright.bias"] = np.array(np.nan)
+    elif problem == "threshold_nan":
+        arrays["front_upright.threshold"] = np.array(np.nan)
+    elif problem == "threshold_one":
+        arrays["back_upright.threshold"] = np.array(1.0)
+    elif problem == "threshold_half":
+        arrays["side.threshold"] = np.array(0.5)
+    elif problem == "threshold_a_string":
+        arrays["side.threshold"] = np.array("0.9")
+    elif problem == "weight_inf":
+        arrays["side.weight"] = np.full(2 * D, np.inf)
+    elif problem == "weight_2d":
+        arrays["back_upright.weight"] = np.zeros((2, 2 * D))
+    np.savez(path, **arrays)
+    svc = _ready_service(head_path, feat_path)
+    _assert_fails_open(svc, expected)
+    svc._extractor = SeqExtractor(_feats(side=(10.0, -10.0), flip=(10.0, 10.0)))
+    assert svc.predict(*pair).notes == [] and svc._extractor.calls == 1
+
+
+def test_wrong_shape_weight_is_refused_even_when_the_width_is_unknown(tmp_path):
+    guard = _guard()
+    guard.save(tmp_path / "g.npz")
+    with np.load(tmp_path / "g.npz") as z:
+        arrays = {k: z[k] for k in z.files}
+    arrays["side.weight"] = arrays["side.weight"].reshape(1, 2 * D)
+    np.savez(tmp_path / "g.npz", **arrays)
+    with pytest.raises(ValueError, match=r"weight shape \(1, 8\); need 1-D"):
+        FaceGuard.load(tmp_path / "g.npz")
+
+
+def test_guard_decision_error_grades_unguarded_and_warns_each_time(tmp_path, pair, caplog):
+    """A guard that raises in decide (here a 2-D weight set past the load check)
+    never fails the request: it grades as with no guard and logs a WARNING per request."""
+    import logging
+
+    feats = _feats(side=(10.0, -10.0), flip=(10.0, 10.0))
+    bad = _guard()
+    bad.probes["side"] = LogisticProbe(np.zeros((1, 2 * D)), 0.0)
+    guarded = _service(tmp_path / "a", bad, feats)
+    plain = _service(tmp_path / "b", None, feats)
+    with caplog.at_level(logging.WARNING, logger="backend.app.ml.inference"):
+        preds = [guarded.predict(*pair) for _ in range(2)]
+    want = plain.predict(*pair)
+    assert all(p == want for p in preds) and preds[0].notes == []
+    np.testing.assert_array_equal(guarded._head.seen[0], feats)
+    assert guarded._extractor.calls == 2  # once per request, no re-extraction
+    warnings = [r for r in caplog.records if r.levelname == "WARNING" and "face guard" in r.getMessage()]
+    assert len(warnings) == 2 and all(r.exc_info for r in warnings)
+
+
+def test_guard_decision_error_still_returns_200(probe_files, serve_env, pair, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import backend.app.api.grade as grade_mod
+    import backend.app.main as main_mod
+
+    head_path, feat_path = _probe_ready(probe_files)
+    _save_guard(head_path)
+    svc = _ready_service(head_path, feat_path)
+    assert svc._guard is not None
+    def decide(self, feats):
+        raise FloatingPointError("boom")
+
+    monkeypatch.setattr(FaceGuard, "decide", decide)
+    svc._extractor = SeqExtractor(_feats(side=(10.0, -10.0)))
+    monkeypatch.setattr(grade_mod, "get_inference_service", lambda: svc)
+    monkeypatch.setattr(main_mod, "get_inference_service", lambda: svc)
+    files = {"front": ("f.jpg", pair[0], "image/jpeg"), "back": ("b.jpg", pair[1], "image/jpeg")}
+    with TestClient(main_mod.create_app()) as c:
+        r = c.post("/api/grade", files=files)
+    assert r.status_code == 200
+    assert NOTE_SWAPPED not in r.json()["notes"]
+
+
+@pytest.mark.parametrize("side, kind", [((10.0, 10.0), "back"), ((-10.0, -10.0), "front")])
+def test_same_side_pair_skips_the_orientation_check(tmp_path, pair, side, kind):
+    """Both rows read as one side: which upright probe applies is unknown (the front
+    probe fires on upright backs), so nothing is rotated; the note stays."""
+    feats = _feats(side=side, flip=(10.0, 10.0))  # both would read as flipped
+    svc = _service(tmp_path, _guard(), feats, _feats(tag=3.0))
+    pred = svc.predict(*pair)
+    assert pred.notes == [f"both photos look like card {kind}s"]
+    assert svc._extractor.calls == 1
+    np.testing.assert_array_equal(svc._head.seen[0], feats)
+    for crop, upload in zip(pred.crops, pair, strict=True):
+        np.testing.assert_array_equal(crop.image, detect_and_crop(upload).image)
+    decision = svc._guard.decide(feats)
+    assert decision.flip == (False, False) and decision.p_flip is None and not decision.swap
+
+
+def test_unsure_side_pair_still_gets_the_orientation_check(tmp_path, pair):
+    # Neither same-side nor swapped: the orientation check runs as before.
+    svc = _service(tmp_path, _guard(), _feats(side=(-10.0, 0.0), flip=(10.0, -10.0)), _feats(tag=2.0))
+    pred = svc.predict(*pair)
+    assert pred.notes == ["front photo was upside down; rotated it"]
+    assert svc._extractor.calls == 2
 
 
 # --------------------------------------------------------------------------- #
