@@ -32,6 +32,10 @@ python -m pytest path/to/test_file.py::test_name
 
 Data collection and the training pipeline (run in order: split → precrop → `python -m ml.training.train_probe`; the legacy CNN path is precompute_factors → train → export): see `README.md`. Evaluate models with card-grouped CV (`train_probe` does): 302 printed cards span the per-cert train/val/test split, so plain split numbers leak card identity.
 
+`split` is sticky: `python -m ml.data.split` only places unassigned certs and never moves an assigned one (check with `--dry-run`, which opens the DB read-only). `--reassign` (`--mode stratified` or `grouped`) rewrites existing assignments and resets every test number: it's a destructive action that needs the owner's explicit approval and a DB backup first.
+
+Test-set policy (decided 2026-10-27): the test split gives one final number per ADR. All model selection (hyperparameters, features, thresholds) uses card-grouped CV on train+val, never the test split.
+
 `smoke.yaml` is the fast end-to-end check (train → checkpoint → export → serve). Restart the API after exporting — the model is loaded once at startup.
 
 ## Architecture

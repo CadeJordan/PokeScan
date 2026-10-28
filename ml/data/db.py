@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS certs (
     front_path     TEXT,
     back_path      TEXT,
     has_images     INTEGER NOT NULL DEFAULT 0,
-    split          TEXT,        -- 'train' | 'val' | 'test' | NULL
+    split          TEXT,        -- 'train' | 'val' | 'test' | 'excluded' | NULL
     fetched_at     TEXT NOT NULL DEFAULT (datetime('now')),
     raw_json       TEXT
 );
@@ -69,6 +69,11 @@ _CROP_STATUS_COLUMNS = {
 }
 
 
+# The `split` a cert had before its first `split.py --reassign`, so the numbers
+# measured on the old assignment stay reproducible. Written once, never updated.
+_SPLIT_COLUMNS = ("split_legacy",)
+
+
 def _migrate(conn) -> None:
     """Best-effort additive migration for pre-existing DBs."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(certs)").fetchall()}
@@ -85,6 +90,9 @@ def _migrate(conn) -> None:
     for col, col_type in _CROP_STATUS_COLUMNS.items():
         if col not in cols:
             conn.execute(f"ALTER TABLE certs ADD COLUMN {col} {col_type}")
+    for col in _SPLIT_COLUMNS:
+        if col not in cols:
+            conn.execute(f"ALTER TABLE certs ADD COLUMN {col} TEXT")
 
 
 @contextmanager

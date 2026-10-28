@@ -192,15 +192,31 @@ and re-crop so the new certs are usable:
 
 ```powershell
 python -m ml.data.ebay_collect --grades 1 2 3 4 5 6 7 8 --per-grade 300
-python -m ml.data.split          # eBay certs always go to train; PSA keeps val/test
+python -m ml.data.split          # sticky: only new certs are placed; eBay goes to train
 python -m ml.data.precrop        # crops only the new certs (add --force to rebuild all)
 python -m ml.data.precompute_factors   # only if you train multitask.yaml
 ```
 
-`split.py` stratifies **only PSA certs** into val/test; every `source='ebay'`
-cert goes to train (`--ebay-split stratify` restores the old behaviour). Adding
-eBay rows therefore never reshuffles the PSA val/test assignment, and the eval
-numbers stay comparable across harvests.
+`split.py` is **sticky** by default: a cert that already has a split keeps it,
+so re-running after any harvest (eBay or PSA) never moves a val/test cert and
+the eval numbers stay comparable. A new PSA cert of a printed card that already
+has PSA certs joins that card's split (the most common one; ties go to test,
+then val). A new card is placed by a hash of its card key (brand|subject|number,
+`ml/data/groups.py`): 15% test, 15% val, the rest train. Only PSA certs go to
+val/test. Every `source='ebay'` cert goes to train, except an eBay cert of a
+card that has a PSA test cert, which gets `split='excluded'` (read by no loader)
+so the test card isn't trained on. `--dry-run` prints the per-split grade
+histogram, the number of test certs that share a card with train/val (the
+"test straddle") and the rows that would change, and writes nothing.
+
+Changing existing assignments needs `--reassign`, a destructive step that
+resets every test number: only with the owner's approval and after a DB
+backup. `--mode stratified --reassign` is the old per-grade shuffle
+(`--ebay-split stratify` works only there). `--mode grouped --reassign` is the
+planned one-time re-split (phase 2 of `intent/stable-grouped-split`): every PSA
+cert is re-placed by its card's hash, so no printed card spans train/val/test.
+The first reassign copies the old split into `split_legacy`, which later runs
+never overwrite, so the old numbers stay reproducible.
 
 ### PSA (high-fidelity validation sample)
 

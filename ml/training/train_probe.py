@@ -182,10 +182,14 @@ def main(
         test_cum = head.meta.cum_probs(head.region_grades(feats[test_mask]))
         report["test"] = _rounded(metrics(y[test_mask], test_cum))
         report["test_majority_baseline"] = _rounded(majority_baseline(y[test_mask], majority))
-        # The split was made per cert, so some test cards also appear in train+val.
+        # Unless the split is card-grouped (`split.py --mode grouped`), some test
+        # cards also appear in train+val; report both halves.
         unseen = ~np.isin(groups[test_mask], groups[fit_mask])
+        report["n_test_seen"] = int((~unseen).sum())
         if unseen.sum() >= 20:
             report["test_unseen_cards"] = _rounded(metrics(y[test_mask][unseen], test_cum[unseen]))
+        if (~unseen).sum() >= 20:
+            report["test_seen_cards"] = _rounded(metrics(y[test_mask][~unseen], test_cum[~unseen]))
         log.info("test: %s", report["test"])
 
     head.metadata = {
@@ -195,7 +199,11 @@ def main(
         "n_fit": int(fit_mask.sum()),
         "trained_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "git_commit": _git_commit(),
-        **{k: v for k, v in report.items() if k in ("cv_grouped", "test")},
+        **{
+            k: v
+            for k, v in report.items()
+            if k in ("cv_grouped", "test", "test_seen_cards", "n_test_seen")
+        },
     }
     head_path = settings.models_dir / "grade_head.npz"
     head.save(head_path)

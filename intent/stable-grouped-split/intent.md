@@ -77,33 +77,58 @@ Measured 2026-10-23 on the real rows (read-only; see [[cv-ml-improvement-plan]] 
 
 All tests build their own DB in `tmp_path` via `ml.data.db.connect`. None of them touches `data/`.
 
-- [ ] Fast suite: `python -m pytest -m "not slow and not visual and not model"` → 0 failed, 2 xfailed, passed = baseline + the new tests. `ml/tests/test_split.py` passes **unchanged** (`assign_splits` is untouched).
-- [ ] `ml/tests/test_split_sticky.py` (new):
-  - [ ] Split 500 synthetic PSA certs (sticky), then add 1 and then 50 new certs and split again: **0** existing certs change split.
-  - [ ] A new cert of a card already in test lands in test. Same for val and train.
-  - [ ] Over 3,000 synthetic single-cert cards, the new-card test share is 15% ± 2 pp and the val share is 15% ± 2 pp.
-  - [ ] An eBay cert of a card with a PSA test cert gets `excluded`. Other eBay certs get `train`.
-  - [ ] Shuffling the input row order gives identical assignments.
-  - [ ] `--mode grouped --reassign`: no group spans two of train/val/test; `split_legacy` equals the pre-run `split` for every row; a second run leaves `split_legacy` unchanged.
-  - [ ] `--mode stratified` without `--reassign` exits non-zero and writes nothing.
-  - [ ] `--dry-run` leaves the DB file's bytes unchanged.
-- [ ] `card_groups` output is identical before and after the refactor: a test over synthetic rows, plus one read-only check over the real DB (`mode=ro`), marked `slow`.
-- [ ] Real DB, phase 1:
-  - [ ] `python -m ml.data.split --dry-run` prints 0 changed rows and a test straddle count of 251 (or the current value). Stop here if it reports any changed row.
-  - [ ] Check that no DB-writing job is running (collectors, `precrop`, `precompute_factors`), then back up: `sqlite3 data/pokescan.sqlite ".backup data/backups/pre-sticky-split.sqlite"` (or Python's `sqlite3.Connection.backup` if the CLI is missing). Confirm the backup opens and has the same row count. Check `data/backups/` is gitignored (`data/*` subfolders are listed one by one in `.gitignore`; add it if not).
-  - [ ] Run `python -m ml.data.split` for real: it changes 0 rows.
+- [x] Fast suite: `python -m pytest -m "not slow and not visual and not model"` → 0 failed, 2 xfailed, passed = baseline + the new tests. `ml/tests/test_split.py` passes **unchanged** (`assign_splits` is untouched).
+  - 2026-10-27: 421 passed (398 + 23 new: 20 in `test_split_sticky.py`, 3 in `test_card_groups.py`), 2 xfailed, 184 deselected (183 + the new slow test), 110 s. `test_split.py` and `assign_splits` / `_stratified_assign` are unchanged.
+- [x] `ml/tests/test_split_sticky.py` (new):
+  - [x] Split 500 synthetic PSA certs (sticky), then add 1 and then 50 new certs and split again: **0** existing certs change split.
+    - `test_adding_certs_never_moves_existing_ones` (pure function; the 50 mix known and new cards). `test_cli_sticky_rerun_changes_nothing` does the same through the CLI on a `tmp_path` DB (300 PSA + 40 eBay, then +50).
+  - [x] A new cert of a card already in test lands in test. Same for val and train.
+    - `test_new_cert_joins_its_cards_split`; `test_straddling_card_takes_majority_then_test_first` pins the majority rule and the test > val > train tie-break.
+  - [x] Over 3,000 synthetic single-cert cards, the new-card test share is 15% ± 2 pp and the val share is 15% ± 2 pp.
+  - [x] An eBay cert of a card with a PSA test cert gets `excluded`. Other eBay certs get `train`.
+    - For both sticky and grouped. An eBay cert already in `train` whose card later gets a PSA test cert moves to `excluded` in sticky mode too (see Facts vs assumptions); eBay certs in any other split keep it (`test_assigned_ebay_keeps_its_split_in_sticky`).
+  - [x] Shuffling the input row order gives identical assignments.
+    - Sticky and grouped, 3 shuffles each, over assigned + unassigned PSA rows and eBay rows.
+  - [x] `--mode grouped --reassign`: no group spans two of train/val/test; `split_legacy` equals the pre-run `split` for every row; a second run leaves `split_legacy` unchanged.
+    - `test_cli_grouped_reassign_keeps_legacy` starts from a random per-cert split. "No group spans" holds for PSA rows. eBay rows go to train by the rule above, so a *val* card can have eBay train certs; the test asserts a test card has nothing in train or val. The second run uses another salt so it really moves certs, and `split_legacy` is still the original.
+  - [x] `--mode stratified` without `--reassign` exits non-zero and writes nothing.
+    - Exit 1, DB file hash unchanged; same for `--mode grouped`. `--ebay-split stratify` without `--mode stratified` is refused too (exit 2).
+  - [x] `--dry-run` leaves the DB file's bytes unchanged.
+    - Sticky and grouped dry runs over 340 unassigned rows: hash unchanged, all splits still NULL, log says "changed split: 340 of 340 rows".
+- [x] `card_groups` output is identical before and after the refactor: a test over synthetic rows, plus one read-only check over the real DB (`mode=ro`), marked `slow`.
+  - `ml/tests/test_card_groups.py`. The slow test (2026-10-27: passes, 3 s, all 7,429 rows) compares against the old f-string and also checks that `card_group_key` on the raw (NULL-able) columns, as `split.py` calls it, equals the CV groups cert for cert.
+- [x] Real DB, phase 1:
+  - [x] `python -m ml.data.split --dry-run` prints 0 changed rows and a test straddle count of 251 (or the current value). Stop here if it reports any changed row.
+    - 2026-10-27: "changed split: 0 of 2630 rows (mode=sticky)", test straddle **255** of 393 test certs. The 251 of 388 was over `train_probe`'s rows (usable precrop only); recomputed on those rows it is still 251/388. DB file hash identical before and after. Per-split grades:
+
+      | split | n | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+      |---|---|---|---|---|---|---|---|---|---|---|---|
+      | train | 1844 | 1 | 2 | 6 | 5 | 20 | 26 | 40 | 140 | 515 | 1089 |
+      | val | 393 | | | 1 | 1 | 4 | 5 | 9 | 30 | 110 | 233 |
+      | test | 393 | | | 1 | 1 | 4 | 5 | 9 | 30 | 110 | 233 |
+  - [x] Check that no DB-writing job is running (collectors, `precrop`, `precompute_factors`), then back up: `sqlite3 data/pokescan.sqlite ".backup data/backups/pre-sticky-split.sqlite"` (or Python's `sqlite3.Connection.backup` if the CLI is missing). Confirm the backup opens and has the same row count. Check `data/backups/` is gitignored (`data/*` subfolders are listed one by one in `.gitignore`; add it if not).
+    - 2026-10-27: no `python.exe`/`sqlite3.exe` process running. Backup with `Connection.backup` from a `mode=ro` source: `data/backups/pre-sticky-split.sqlite`, 6,762,496 bytes, `integrity_check` ok, 7,429 rows (1,844 train / 393 val / 393 test / 4,799 NULL), same as the source. `data/backups/` was not ignored; added to `.gitignore`.
+  - [x] Run `python -m ml.data.split` for real: it changes 0 rows.
+    - 2026-10-27: "changed split: 0 of 2630 rows". Compared cert by cert with the backup: 0 of 7,429 `split` values differ. The only change is the migration's new `split_legacy` column (all NULL).
 - [ ] Phase 2, only after approval and a backup:
   - `python -m ml.data.split --mode grouped --reassign`, then `python -m ml.training.train_probe`;
   - the report shows `n_test_seen == 0`;
   - a new ADR records the new test n, grade histogram and metrics next to the old ones;
   - `python -m ml.eval.evaluate --split test --save-baseline` is re-run.
-- [ ] `ruff check .` exits 0.
+- [x] `ruff check .` exits 0.
 
 ## Facts vs assumptions
 
 - **Fact:** the instability numbers, the 251/388 seen-card test certs and the simulated grouped-split sizes above (2026-10-23). There are currently 0 eBay rows.
 - **Fact:** `train_probe` fits on train+val together, so after phase 2 only the test assignment matters for the probe. Val still matters for the legacy CNN.
-- **Assumption:** `split='excluded'` breaks no reader. Grep for `split` filters in `ml/` and `backend/`. `ml/data/db.py` helpers that count per split will show a new key.
+- **Fact (checked 2026-10-27):** `split='excluded'` breaks no reader. Every `split` read in `ml/` and `backend/`:
+  - `train_probe.load_rows` loads `split IS NOT NULL`, so excluded rows get features extracted (and cached), but they are in neither `fit_mask` (train/val), `test_mask` (test) nor the majority baseline. Wasted extraction only, no effect on any number.
+  - `dataset.load_records(split)` filters `split=?`; its callers (`PSACardDataModule`, `precrop_coverage` in `train.py`'s guard, `evaluate.load_samples`) only ask for train/val/test.
+  - `precrop`, `precompute_factors` and `detection_report` take `--split` as an exact match; without it they process every row, excluded included (harmless). `precrop_coverage_by_split` and `detection_report`'s table show an `excluded` key.
+  - `backend/app` reads no `split`; backend tests read `split='test'` only.
+- **Fact:** an eBay cert already in `train` moves to `excluded` in sticky mode when its card gets a PSA test cert. That's the one move sticky mode makes; it only takes a test card out of train, and keeping it would add test-card leakage. eBay certs in val/test (an old `--ebay-split stratify` run) or `excluded` keep their split. 0 eBay rows today, so it didn't affect the real run.
+- **Fact:** any `--reassign` (stratified too, not only grouped) first copies `split` into `split_legacy` where that is NULL, so the original assignment survives whichever reassign runs first.
+- **Open (not fixed, out of scope):** `ml/data/collect.py` upserts `"split": None`, so re-scanning a PSA cert range that was already collected resets those certs' split to NULL, and sticky mode then re-places them (by card majority or hash), which can move a test cert. `ebay_collect` skips existing certs, so it's unaffected. Dropping `split` from the collector's row dict would close this; candidate for `intent/smallfix.md`.
 - **Assumption:** a hash split without grade stratification keeps enough low grades in test. Simulated 49–61 ≤8 vs 50 today; check with `--dry-run` before phase 2.
 
 ## Owner decisions (2026-10-27)
