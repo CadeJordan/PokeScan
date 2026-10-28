@@ -172,9 +172,11 @@ class GradeInferenceService:
     def _check_feature_spec(self, head_meta: dict) -> None:
         """Raise ValueError unless head, feature graph and this code share one feature spec.
 
-        A head with a `feature_spec_hash` needs the code's hash and a sidecar with the
-        same one. A head without it (artifacts from before the check) loads with a
-        WARNING, unless the sidecar records another spec than the code's.
+        A head with a `feature_spec_hash` key needs a non-empty string there, equal
+        to the code's hash and to the sidecar's. A head without the key (artifacts
+        from before the check) loads with a WARNING, unless the sidecar records
+        another spec than the code's. An OS error reading the sidecar (e.g. a
+        directory at that path) propagates, so it fails closed for every head.
         """
         from backend.app.ml.features import feature_spec_hash
 
@@ -186,10 +188,13 @@ class GradeInferenceService:
                 feat_meta = json.loads(sidecar.read_text())
             except (json.JSONDecodeError, UnicodeDecodeError):
                 log.exception("could not parse feature model metadata at %s", sidecar)
+        has_head_hash = "feature_spec_hash" in head_meta
         head_hash = head_meta.get("feature_spec_hash")
         feat_hash = feat_meta.get("feature_spec_hash") if isinstance(feat_meta, dict) else None
         problems = []
-        if head_hash:
+        if has_head_hash and (not isinstance(head_hash, str) or not head_hash):
+            problems.append(f"head {head_hash!r} ({self.head_path.name}) is not a hash")
+        elif has_head_hash:
             if head_hash != code_hash:
                 problems.append(f"head {head_hash} ({self.head_path.name}) != code {code_hash}")
             if not sidecar.exists():
@@ -205,7 +210,7 @@ class GradeInferenceService:
                 f"feature_spec_hash: {'; '.join(problems)}: "
                 "retrain with `python -m ml.training.train_probe`"
             )
-        if not head_hash:
+        if not has_head_hash:
             # Artifacts from before the check: keep loading them.
             log.warning(
                 "feature_spec_hash missing (head %s, %s %s); can't check that head and "

@@ -242,6 +242,8 @@ python -m ml.data.collect_all `
 
 Resume from where a token stopped (use the logged cert number as the next start for that slot).
 
+Both skip certs already collected with images, without any PSA call (the log says how many). Certs stored without images are fetched again. `--refresh` re-fetches every cert in the range; it spends quota and re-downloads the images.
+
 ## Train a model
 
 ### Probe model (default)

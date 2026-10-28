@@ -58,6 +58,7 @@ python -m ml.data.collect_all --starts 76032000,76037000,76042000,76047000,76052
   - `--daily-limit-token0 1000` for token 0
 - **Non-overlapping windows** — space starts by **5,000** when `--count 5000` (e.g. 76,032,000 / 76,037,000 / …).
 - **DB is source of truth** for what was stored; `upsert_cert` means re-scanning an already-seen cert is safe but wastes API quota.
+  - 2026-10-27: a re-scan now skips certs already collected with images, without any PSA call; `--refresh` re-fetches them.
 
 ---
 
