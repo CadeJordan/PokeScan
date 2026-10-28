@@ -28,7 +28,12 @@ from rich.progress import (
 from backend.app.core.config import get_settings
 from ml.data.db import connect, pokemon_cert_count, upsert_cert
 from ml.data.image_io import save_compressed_jpeg
-from ml.data.psa_client import PSAClient, PSAQuotaExhaustedError, PSARateLimitError
+from ml.data.psa_client import (
+    PSACertDetails,
+    PSAClient,
+    PSAQuotaExhaustedError,
+    PSARateLimitError,
+)
 
 logging.basicConfig(level=logging.INFO, handlers=[RichHandler(rich_tracebacks=True)])
 # httpx logs every request at INFO; with hundreds of 404s in a row that's
@@ -37,6 +42,32 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("collect")
 
 app = typer.Typer(add_completion=False, help="Harvest PSA certs into local SQLite + images.")
+
+
+def _details_row(details: PSACertDetails) -> dict:
+    """The `certs` row for a cert's details, before any images are fetched.
+
+    `upsert_cert` overwrites every key on conflict, so this leaves out the
+    columns other steps own (`split`, crops, sub-grades): re-scanning a cert
+    must not reset them.
+    """
+    return {
+        "cert_number": details.cert_number,
+        "brand_title": details.brand_title,
+        "subject": details.subject,
+        "year": details.year,
+        "card_number": details.card_number,
+        "category": details.category,
+        "grade_label": details.grade_label,
+        "grade_int": details.grade_int,
+        "is_pokemon": int(details.is_pokemon),
+        "front_url": None,
+        "back_url": None,
+        "front_path": None,
+        "back_path": None,
+        "has_images": 0,
+        "raw_json": json.dumps(details.raw),
+    }
 
 
 async def _process_cert(
@@ -49,24 +80,7 @@ async def _process_cert(
         details = await psa.get_cert_details(cert_number)
         if details is None:
             return None
-        row: dict = {
-            "cert_number": details.cert_number,
-            "brand_title": details.brand_title,
-            "subject": details.subject,
-            "year": details.year,
-            "card_number": details.card_number,
-            "category": details.category,
-            "grade_label": details.grade_label,
-            "grade_int": details.grade_int,
-            "is_pokemon": int(details.is_pokemon),
-            "front_url": None,
-            "back_url": None,
-            "front_path": None,
-            "back_path": None,
-            "has_images": 0,
-            "split": None,
-            "raw_json": json.dumps(details.raw),
-        }
+        row = _details_row(details)
         if not details.is_pokemon or details.grade_int is None:
             return row
 
