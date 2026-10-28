@@ -30,7 +30,7 @@ python -m pytest path/to/test_file.py::test_name
 #          visual (writes overlays to test-artifacts/overlays/)
 ```
 
-Data collection and the training pipeline (run in order: split → precrop → `python -m ml.training.train_probe`; the legacy CNN path is precompute_factors → train → export): see `README.md`. Evaluate models with card-grouped CV (`train_probe` does): 302 printed cards span the per-cert train/val/test split, so plain split numbers leak card identity.
+Data collection and the training pipeline (run in order: split → precrop → `python -m ml.training.train_probe`; the legacy CNN path is precompute_factors → train → export): see `README.md`. Evaluate models with card-grouped CV (`train_probe` does): a printed card has several certs, so per-cert folds leak card identity. The test split itself is card-grouped since 2026-10-27 (`--mode grouped --reassign`, `docs/adr/0002-card-grouped-test-split.md`): no printed card spans train/val/test, and the pre-re-split assignment is kept in `split_legacy`.
 
 `split` is sticky: `python -m ml.data.split` only places unassigned certs and never moves an assigned one (check with `--dry-run`, which opens the DB read-only). `--reassign` (`--mode stratified` or `grouped`) rewrites existing assignments and resets every test number: it's a destructive action that needs the owner's explicit approval and a DB backup first.
 

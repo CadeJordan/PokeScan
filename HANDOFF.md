@@ -4,7 +4,7 @@
 
 Build **PokeScan**: a system that predicts PSA grades (1–10) for Pokémon cards from photos, with calibrated confidence. The immediate work in this session was **harvesting training/validation data** from the **PSA Public API** using multiple bearer tokens (`PSA_API_TOKEN0`–`PSA_API_TOKEN5` in `.env`), saving cert metadata and front/back images into local SQLite + `data/images/`.
 
-Longer-term pipeline (from README): eBay bulk collection → PSA high-fidelity sample → stratified split → train CORN ordinal model → export ONNX → FastAPI + Next.js UI.
+Longer-term pipeline (from README): eBay bulk collection → PSA high-fidelity sample → card-grouped split (sticky since 2026-10-27, ADR 0002) → train CORN ordinal model → export ONNX → FastAPI + Next.js UI.
 
 ---
 

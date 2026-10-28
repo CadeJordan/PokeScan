@@ -61,7 +61,7 @@ def test_detection_rate_on_real_photos(report):
 # Leakage guard. A test input where no card outline is found is fed to the
 # model as the padded raw slab photo, whose PSA label prints the grade, so
 # every fallback can inflate the score. The target is zero, but the detector
-# still misses 5 of the 393 test certs (1.3%; one is a die-cut card), as
+# still misses 5 of the 375 test certs (1.3%; card-grouped split, ADR 0002), as
 # recorded in certs.crop_found_* by
 # precrop.py. Allow at most 1.5% so a detector regression fails this test;
 # lower the bound as detection improves.

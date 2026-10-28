@@ -188,8 +188,8 @@ Both sources write to the same SQLite `certs` table with a `source` column (`psa
 python -m ml.data.ebay_collect --grades 6 7 8 9 10 --per-grade 500
 ```
 
-Low grades are scarce (the PSA test split has only ~20 cards graded 8 or
-below), so run a dedicated low-grade pass. `--per-grade` is a target; the
+Low grades are scarce (the PSA test split has 47 certs graded 8 or below, 18 of
+them 7 or below), so run a dedicated low-grade pass. `--per-grade` is a target; the
 collector stops early when eBay runs out of matching listings. Then re-split
 and re-crop so the new certs are usable:
 
@@ -216,8 +216,10 @@ Changing existing assignments needs `--reassign`, a destructive step that
 resets every test number: only with the owner's approval and after a DB
 backup. `--mode stratified --reassign` is the old per-grade shuffle
 (`--ebay-split stratify` works only there). `--mode grouped --reassign` is the
-planned one-time re-split (phase 2 of `intent/stable-grouped-split`): every PSA
-cert is re-placed by its card's hash, so no printed card spans train/val/test.
+one-time re-split (phase 2 of `intent/stable-grouped-split`, run on 2026-10-27,
+`docs/adr/0002-card-grouped-test-split.md`): every PSA cert is re-placed by its
+card's hash, so no printed card spans train/val/test. The current DB is in that
+state; since then the default sticky mode keeps it.
 The first reassign copies the old split into `split_legacy` (NULL for certs
 that had none); later reassigns leave that column alone, so the old numbers stay
 reproducible.
@@ -363,7 +365,7 @@ Do the same with the single-task v3 checkpoint (`best-03-0.668.ckpt`).
 
 Run each configuration on the same clean crops (Step 1 done, `precrop --force`
 run). Pick the winner by **val** QWK, then confirm it on **test**. It must beat
-always-predict-10 on MAE (0.64 on the current test split).
+always-predict-10 on MAE (0.66 on the current test split).
 
 | Run | Config | `sampler_power` |
 |---|---|---|

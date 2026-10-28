@@ -111,11 +111,17 @@ All tests build their own DB in `tmp_path` via `ml.data.db.connect`. None of the
     - 2026-10-27: no `python.exe`/`sqlite3.exe` process running. Backup with `Connection.backup` from a `mode=ro` source: `data/backups/pre-sticky-split.sqlite`, 6,762,496 bytes, `integrity_check` ok, 7,429 rows (1,844 train / 393 val / 393 test / 4,799 NULL), same as the source. `data/backups/` was not ignored; added to `.gitignore`.
   - [x] Run `python -m ml.data.split` for real: it changes 0 rows.
     - 2026-10-27: "changed split: 0 of 2630 rows". Compared cert by cert with the backup: 0 of 7,429 `split` values differ. The only change is the migration's new `split_legacy` column (all NULL).
-- [ ] Phase 2, only after approval and a backup:
+- [x] Phase 2, only after approval and a backup:
   - `python -m ml.data.split --mode grouped --reassign`, then `python -m ml.training.train_probe`;
   - the report shows `n_test_seen == 0`;
   - a new ADR records the new test n, grade histogram and metrics next to the old ones;
   - `python -m ml.eval.evaluate --split test --save-baseline` is re-run.
+  - 2026-10-27 (second attempt, after the sanity check was re-referenced): read-only 3-seed CV first: grouped fit set 0.4694 / 0.4668 / 0.4610, mean **0.4657**, +0.014 over 0.4518, inside ±0.02. Old fit set reproduced 0.4467 / 0.4552 / 0.4534.
+  - Backups: the live DB was first checked equal to the earlier backups (0 split diffs, `split_legacy` all NULL), then backed up with `Connection.backup` from a `mode=ro` source to `data/backups/pre-grouped-split.sqlite` (integrity ok, 7,429 rows, 1,844 / 393 / 393 / 4,799 NULL, per-cert identical). `grade_head.*`, `card_features.*` and `grade_model.*` copied to `data/models/backup/pre-grouped-split/`, SHA-256 identical. No `python.exe`/`sqlite3.exe` was running.
+  - Dry run and real run print the same: test 375 (47 graded ≤8), val 374, train 1,881, test straddle 0, "changed split: 1218 of 2630 rows (mode=grouped)". Cert by cert against the dry-run assignment: 0 mismatches, 0 non-eligible rows touched, 0 of 1,310 cards span splits. This was the first reassign, so `split_legacy` was filled and equals the pre-run split for every row.
+  - `train_probe`: `n_test_seen` **0**, test n 370, `feature_spec_hash` 428e7a366e2e unchanged, ONNX not re-exported. CV MAE 0.4694 (n 2,241), test MAE 0.4405 / QWK 0.485 / exact 66.5%.
+  - `evaluate --split test --save-baseline` (served probe, n 375): MAE 0.435, exact 66.9%, QWK 0.491, ECE 0.053, always-10 MAE 0.656. Written to `ml/eval/baseline.json`, which is tracked.
+  - ADR: `docs/adr/0002-card-grouped-test-split.md`.
 - [x] `ruff check .` exits 0.
 
 ## Facts vs assumptions

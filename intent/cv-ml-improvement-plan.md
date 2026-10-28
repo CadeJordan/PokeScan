@@ -12,6 +12,8 @@ Small fixes found in the review are in `intent/smallfix.md` §10.
 
 ## How the system performs now
 
+> 2026-10-27: superseded for test numbers. The test split was re-assigned by card (item 9, [[stable-grouped-split]] phase 2), so the test rows below describe the old per-cert split, and the CV rows the old fit set. Current numbers: `docs/adr/0002-card-grouped-test-split.md`.
+
 Probe model (`data/models/grade_head.json`, trained 2026-10-23, commit `77a34ea`, 2,223 fit certs, all PSA):
 
 | | n | MAE | exact | QWK | ECE | AUC ≤8 vs ≥9 | AUC 10 vs 9 |
@@ -119,6 +121,8 @@ Ranked by impact over effort. Effort: S < ½ day, M = 1–2 days, L > 3 days.
 - **Impact:** low–medium (7% of certs, a partial gain). **Effort:** M (detector work, then `precrop --force` and a feature re-extraction; depends on item 3). Not specced.
 
 ### 9. The test split isn't card-grouped (phase 2 of [[stable-grouped-split]], needs decision)
+
+*Done 2026-10-27: re-split by card, new baseline in `docs/adr/0002-card-grouped-test-split.md`. The problem below describes the old split.*
 
 - **Problem:** 251 of the 388 test certs share a printed card with train+val, so the headline test number mixes seen-card performance (MAE 0.414) with unseen-card performance (MAE 0.628).
 - **Evidence:** I simulated a hash-on-card-group assignment with four salts. It gives 341–446 test certs with 49–61 graded ≤8 (the current split has 50), so stratification is roughly preserved. Only 54–63 of today's 393 test certs would stay in test.
