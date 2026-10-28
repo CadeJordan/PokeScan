@@ -358,20 +358,58 @@ def test_matching_feature_spec_hashes_load_as_probe(probe_files, serve_env, capl
     assert not [r for r in caplog.records if "feature_spec_hash" in r.getMessage()]
 
 
-@pytest.mark.parametrize("head_hash, sidecar", [(None, False), ("abc", False), (None, True)])
+@pytest.mark.parametrize("sidecar", ["none", "code", "unreadable"])
 def test_missing_feature_spec_hash_still_loads_with_warning(
-    probe_files, serve_env, caplog, head_hash, sidecar
+    probe_files, serve_env, caplog, sidecar
 ):
-    # Artifacts from before the check: a head without a hash and/or no sidecar.
+    # Artifacts from before the check: a head without a hash, with no sidecar, one
+    # matching the code, or one that doesn't parse.
+    from backend.app.ml.features import feature_spec_hash
+
     head_path, feat_path = probe_files
-    _save_head(head_path, 4, {"feature_spec_hash": head_hash} if head_hash else {})
-    if sidecar:
-        _write_feature_sidecar(feat_path, "abc")
+    _save_head(head_path, 4)
+    if sidecar == "code":
+        _write_feature_sidecar(feat_path, feature_spec_hash())
+    elif sidecar == "unreadable":
+        feat_path.with_suffix(".json").write_text("{not json")
     with caplog.at_level("WARNING", logger="backend.app.ml.inference"):
         svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
     assert svc.kind == "probe" and svc.ready
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert any("feature_spec_hash missing" in r.getMessage() for r in warnings)
+
+
+@pytest.mark.parametrize(
+    "head_hash, sidecar, expected",
+    [
+        ("code", None, "f.json missing"),
+        ("code", "[1, 2]", "f.json unreadable"),
+        ("code", "{not json", "f.json unreadable"),
+        ("code", "{}", "f.json None != head"),
+        ("0123456789ab", "0123456789ab", "head 0123456789ab (h.npz) != code"),
+        (None, "0123456789ab", "f.json 0123456789ab != code"),
+    ],
+)
+def test_feature_spec_disagreement_fails_closed(
+    probe_files, serve_env, head_hash, sidecar, expected
+):
+    # A head with a hash needs the code's hash and a matching sidecar; a head
+    # without one still refuses a sidecar from another spec than the code's.
+    from backend.app.ml.features import feature_spec_hash
+
+    code = feature_spec_hash()
+    head_path, feat_path = probe_files
+    head_hash = code if head_hash == "code" else head_hash
+    _save_head(head_path, 4, {"feature_spec_hash": head_hash} if head_hash else {})
+    if sidecar is not None and sidecar[0] in "[{":
+        feat_path.with_suffix(".json").write_text(sidecar)
+    elif sidecar is not None:
+        _write_feature_sidecar(feat_path, sidecar)
+    svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
+    assert not svc.ready
+    err = svc.metadata["probe_load_error"]
+    assert err.startswith("ValueError: feature_spec_hash: ")
+    assert expected in err
 
 
 @pytest.mark.parametrize("missing", ["head", "features", "both"])

@@ -1,6 +1,6 @@
 # Small fixes
 
-Changes too small for their own spec. Each one should leave behaviour unchanged and keep the fast suite at its baseline: 398 passed / 2 xfailed (2026-10-23, after [[serve-input-normalization]] and its landscape-only retry fix; raise it as tests are added):
+Changes too small for their own spec. Each one should leave behaviour unchanged and keep the fast suite at its baseline: 477 passed / 2 xfailed (2026-10-27, after [[stable-grouped-split]], [[probe-artifact-consistency]] and their tester-review fixes; raise it as tests are added):
 `python -m pytest -m "not slow and not visual and not model"`
 
 ## 1. Lint baseline (ruff: 25 errors → 0)

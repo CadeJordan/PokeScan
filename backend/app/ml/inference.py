@@ -170,22 +170,42 @@ class GradeInferenceService:
         )
 
     def _check_feature_spec(self, head_meta: dict) -> None:
-        """Raise ValueError if head and feature graph record different feature specs."""
+        """Raise ValueError unless head, feature graph and this code share one feature spec.
+
+        A head with a `feature_spec_hash` needs the code's hash and a sidecar with the
+        same one. A head without it (artifacts from before the check) loads with a
+        WARNING, unless the sidecar records another spec than the code's.
+        """
+        from backend.app.ml.features import feature_spec_hash
+
+        code_hash = feature_spec_hash()
         sidecar = self.features_path.with_suffix(".json")
-        feat_meta: dict = {}
+        feat_meta = None
         if sidecar.exists():
             try:
                 feat_meta = json.loads(sidecar.read_text())
             except (json.JSONDecodeError, UnicodeDecodeError):
                 log.exception("could not parse feature model metadata at %s", sidecar)
         head_hash = head_meta.get("feature_spec_hash")
-        feat_hash = feat_meta.get("feature_spec_hash")
-        if head_hash and feat_hash and head_hash != feat_hash:
+        feat_hash = feat_meta.get("feature_spec_hash") if isinstance(feat_meta, dict) else None
+        problems = []
+        if head_hash:
+            if head_hash != code_hash:
+                problems.append(f"head {head_hash} ({self.head_path.name}) != code {code_hash}")
+            if not sidecar.exists():
+                problems.append(f"{sidecar.name} missing")
+            elif not isinstance(feat_meta, dict):
+                problems.append(f"{sidecar.name} unreadable")
+            elif feat_hash != head_hash:
+                problems.append(f"{sidecar.name} {feat_hash} != head {head_hash}")
+        elif feat_hash and feat_hash != code_hash:
+            problems.append(f"{sidecar.name} {feat_hash} != code {code_hash}")
+        if problems:
             raise ValueError(
-                f"feature_spec_hash {head_hash} ({self.head_path.name}) != "
-                f"{feat_hash} ({sidecar.name}): retrain with `python -m ml.training.train_probe`"
+                f"feature_spec_hash: {'; '.join(problems)}: "
+                "retrain with `python -m ml.training.train_probe`"
             )
-        if not (head_hash and feat_hash):
+        if not head_hash:
             # Artifacts from before the check: keep loading them.
             log.warning(
                 "feature_spec_hash missing (head %s, %s %s); can't check that head and "

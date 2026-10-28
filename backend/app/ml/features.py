@@ -138,6 +138,9 @@ def export_onnx(path: Path, pretrained: bool = True) -> None:
     model = build_region_model(pretrained)
     dummy = torch.zeros(2, 3, FEAT_H, FEAT_W)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Drop the old sidecar first, so a failure below never leaves it vouching for
+    # the new graph (serving then fails closed and train_probe re-exports).
+    path.with_suffix(".json").unlink(missing_ok=True)
     torch.onnx.export(
         model,
         dummy,

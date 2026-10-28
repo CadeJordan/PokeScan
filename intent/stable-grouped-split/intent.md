@@ -50,6 +50,7 @@ Measured 2026-10-23 on the real rows (read-only; see [[cv-ml-improvement-plan]] 
 - `--mode grouped --reassign` (phase 2):
   - Every PSA row is re-assigned by `group_bucket` of its group, with eBay handled as above.
   - Before writing, copy the current `split` into a new column `split_legacy`. Add the column via the migration in `ml/data/db.py`. Only fill it if it's null, so a second re-split doesn't overwrite the original.
+    - 2026-10-27 (tester review): "only if it's null" per row let a second reassign fill in certs that had no split at the first one (NULL), or arrived later, with a post-first-reassign split. Now `split` is copied only on the first reassign ever: if any row already has a non-NULL `split_legacy`, the copy is skipped. Certs with no split at that first reassign stay NULL ("had no split"). Edge case: if every cert was unassigned at the first reassign, the column stays all NULL and the next reassign counts as the first (there was no old assignment to keep). Test: `ml/tests/test_review_split_artifacts.py::test_split_legacy_not_filled_by_a_later_reassign`.
 - `--reassign` is required to change any existing assignment; without it, `stratified` and `grouped` refuse to run.
 - `--dry-run` computes and prints, and writes nothing. Open the DB read-only in that mode.
 - `--ebay-split stratify` keeps working only with `--mode stratified`.
@@ -122,14 +123,15 @@ All tests build their own DB in `tmp_path` via `ml.data.db.connect`. None of the
 - **Fact:** the instability numbers, the 251/388 seen-card test certs and the simulated grouped-split sizes above (2026-10-23). There are currently 0 eBay rows.
 - **Fact:** `train_probe` fits on train+val together, so after phase 2 only the test assignment matters for the probe. Val still matters for the legacy CNN.
 - **Fact (checked 2026-10-27):** `split='excluded'` breaks no reader. Every `split` read in `ml/` and `backend/`:
-  - `train_probe.load_rows` loads `split IS NOT NULL`, so excluded rows get features extracted (and cached), but they are in neither `fit_mask` (train/val), `test_mask` (test) nor the majority baseline. Wasted extraction only, no effect on any number.
+  - `train_probe.load_rows` filters `split IN ('train','val','test')` (it loaded `split IS NOT NULL` when this was checked, so excluded rows got features extracted but were in neither `fit_mask`, `test_mask` nor the majority baseline), so excluded rows are no longer even extracted.
   - `dataset.load_records(split)` filters `split=?`; its callers (`PSACardDataModule`, `precrop_coverage` in `train.py`'s guard, `evaluate.load_samples`) only ask for train/val/test.
   - `precrop`, `precompute_factors` and `detection_report` take `--split` as an exact match; without it they process every row, excluded included (harmless). `precrop_coverage_by_split` and `detection_report`'s table show an `excluded` key.
   - `backend/app` reads no `split`; backend tests read `split='test'` only.
 - **Fact:** an eBay cert already in `train` moves to `excluded` in sticky mode when its card gets a PSA test cert. That's the one move sticky mode makes; it only takes a test card out of train, and keeping it would add test-card leakage. eBay certs in val/test (an old `--ebay-split stratify` run) or `excluded` keep their split. 0 eBay rows today, so it didn't affect the real run.
-- **Fact:** any `--reassign` (stratified too, not only grouped) first copies `split` into `split_legacy` where that is NULL, so the original assignment survives whichever reassign runs first.
-- **Open (not fixed, out of scope):** `ml/data/collect.py` upserts `"split": None`, so re-scanning a PSA cert range that was already collected resets those certs' split to NULL, and sticky mode then re-places them (by card majority or hash), which can move a test cert. `ebay_collect` skips existing certs, so it's unaffected. Dropping `split` from the collector's row dict would close this; candidate for `intent/smallfix.md`.
+- **Fact:** the first `--reassign` (stratified too, not only grouped) copies `split` into `split_legacy`, so the original assignment survives whichever reassign runs first. Later reassigns leave the column alone (2026-10-27, see Scope).
+- **Fixed (commit 15bce27, 2026-10-27, [[smallfix]]):** `ml/data/collect.py` upserted `"split": None`, so re-scanning a PSA cert range that was already collected reset those certs' split to NULL, and sticky mode then re-placed them (by card majority or hash), which could move a test cert. The collector's row dict no longer has `split`. `ebay_collect` skips existing certs, so it was unaffected.
 - **Assumption:** a hash split without grade stratification keeps enough low grades in test. Simulated 49–61 ≤8 vs 50 today; check with `--dry-run` before phase 2.
+- **Fact (for phase 2 planning):** a read-only `--mode grouped --reassign --dry-run` on the real DB on 2026-10-27 gave 375 test certs, 47 of them graded ≤8 (below the simulated 49–61), test straddle 0, and 1,218 rows changed.
 
 ## Owner decisions (2026-10-27)
 

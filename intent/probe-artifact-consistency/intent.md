@@ -33,6 +33,7 @@ Neither check would catch the cases above.
 - `FEATURE_SPEC: dict` holds `backbone`, `feat_h`, `feat_w`, `patch`, `corner_patches`, `edge_patches`, `regions` (list) and `version` (int, start at 1). Bump `version` whenever `to_input` or `region_means` changes behaviour.
 - `feature_spec_hash() -> str`: the first 12 hex chars of the sha256 of `json.dumps(FEATURE_SPEC, sort_keys=True)`.
 - `export_onnx(path)` also writes `path.with_suffix(".json")` containing `{"feature_spec": FEATURE_SPEC, "feature_spec_hash": ..., "exported_at": ISO-8601}`.
+  - 2026-10-27 (tester review): it deletes the old sidecar before exporting the graph. Before, a crash between overwriting `card_features.onnx` and writing the sidecar left a new graph beside an old sidecar that still matched the old head. Now a missing sidecar fails closed at load (see Load check), and `train_probe` re-exports when it's missing. Test: `ml/tests/test_review_split_artifacts.py::test_failed_sidecar_write_leaves_no_stale_matching_sidecar`.
 
 ### Cache (`ml/training/train_probe.py::extract_features`)
 
@@ -52,9 +53,10 @@ Head metadata gains `feature_spec_hash` and `feature_spec`. Keep every existing 
 
 ### Load check (`backend/app/ml/inference.py::_load_probe`)
 
-- Read the `card_features.json` sidecar.
-- If both the head metadata and the sidecar have a `feature_spec_hash` and they differ, raise `ValueError` naming both hashes.
-- If either side has no hash (artifacts from before this spec), log a WARNING and continue, so existing artifacts keep loading.
+- Read the `card_features.json` sidecar, and compare with `feature_spec_hash()` of the running code (which runs `to_input`).
+- Head metadata has a `feature_spec_hash`: it must equal the code's hash, and the sidecar must exist, parse as a dict and have the same hash. Any violation, including a missing or unparseable sidecar, raises `ValueError` naming what disagreed (e.g. `feature_spec_hash: head 0123456789ab (grade_head.npz) != code 428e7a366e2e`, `card_features.json missing`), so the service fails closed.
+- Head has no hash (artifacts from before this spec): log a WARNING and continue, whatever the sidecar says, so existing artifacts keep loading. Exception: a sidecar whose hash differs from the code's raises too.
+- 2026-10-27 (tester review): the first version compared only the head with the sidecar, never with the code, so after a `FEATURE_SPEC` bump without retraining the API served an old head + graph on new preprocessing. Tests: `backend/tests/test_review_split_artifacts.py::test_artifacts_from_another_feature_spec_than_the_code_are_refused` and `backend/tests/test_inference.py::test_feature_spec_disagreement_fails_closed`.
 
 ### Fail closed (owner decision, [[cv-ml-improvement-plan]] open question 3)
 
@@ -69,7 +71,7 @@ Model selection in `GradeInferenceService.__init__`:
 ### Docs
 
 - README and CLAUDE.md: the API needs the probe files; `ALLOW_LEGACY_MODEL=1` opts into the legacy CNN, next to the `smoke.yaml` end-to-end check (which serves the legacy model). `smoke.yaml` itself is unchanged.
-- The served model directory needs `card_features.json` beside `card_features.onnx` after the real run. Artifacts without it still load, with a WARNING.
+- The served model directory needs `card_features.json` beside `card_features.onnx` after the real run. Artifacts without it still load, with a WARNING, as long as the head has no `feature_spec_hash` either (2026-10-27: a head with a hash and no sidecar fails closed).
 
 ## Out of scope
 
@@ -100,12 +102,14 @@ All new tests use `tmp_path` and synthetic data. None of them reads or writes `d
     - And log no `feature_spec_hash` warning.
   - [x] Mismatched hashes give `ready == False`, and `metadata["probe_load_error"]` contains "feature_spec_hash". With `ALLOW_LEGACY_MODEL=1` and a legacy model present, `kind == "legacy"` and the error is still in `metadata`.
     - Error text: `ValueError: feature_spec_hash aaaaaaaaaaaa (h.npz) != bbbbbbbbbbbb (f.json): retrain with ...`.
+    - 2026-10-27, after the tester review's load-check fix: `ValueError: feature_spec_hash: head aaaaaaaaaaaa (h.npz) != code 428e7a366e2e; f.json bbbbbbbbbbbb != head aaaaaaaaaaaa: retrain with ...` (every disagreement, `; `-separated).
   - [x] Missing probe files give `ready == False` and a `probe_load_error`, even when a legacy model exists. An explicit `model_path` still loads it.
     - Head, features or both missing, e.g. `FileNotFoundError: grade_head.npz, card_features.onnx` (file names, not paths). With the opt-in the legacy model loads and predicts.
   - [x] API: with the service not ready, `/api/grade` returns 503 and `/api/health` shows `model_loaded: false` and the `probe_load_error`.
     - `test_unloadable_probe_gives_503_and_health_says_why` (`backend/tests/test_api.py`) uses a real service with no probe files; the 503 detail mentions `/api/health`.
   - [x] A head without a hash and features without a sidecar still load as probe, with a WARNING logged (use `caplog`).
     - Parametrized: neither has a hash, head only, sidecar only.
+    - 2026-10-27 (tester review): now a head without a hash and no sidecar, a sidecar matching the code, or an unparseable sidecar. "Head only" and a sidecar from another spec than the code now fail closed (`test_feature_spec_disagreement_fails_closed`).
 - [x] `train_probe` order test: with `export_onnx` monkeypatched to raise, `grade_head.npz` is not written (using a `tmp_path` models dir via a monkeypatched `get_settings`).
   - `test_failed_export_writes_no_head`. `test_head_records_feature_spec_and_export_follows_the_sidecar` covers the export rule (exported when the graph is missing; not when the sidecar matches; again with `--force-onnx`, another sidecar hash or no sidecar) and the head metadata's `feature_spec_hash` and `feature_spec`.
 - [x] Real run, once, after both this spec and [[stable-grouped-split]] are implemented, and after `copy data\models\grade_head.* data\models\backup\` and the same for `card_features.onnx` and `cache\region_feats.npz`:

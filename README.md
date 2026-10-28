@@ -126,7 +126,7 @@ NEXT_PUBLIC_API_BASE=http://localhost:8000/api
 
 You need a trained probe model (`python -m ml.training.train_probe`) before `/grade` works: `data/models/grade_head.npz` (+ `grade_head.json`) and `card_features.onnx` (+ `card_features.json`). If none exists yet, skip to [Train a model](#train-a-model) or the health check will report `model_loaded: false`.
 
-The API fails closed: if a probe file is missing or doesn't load (corrupt, or head and feature graph built from different feature specs), `/api/grade` returns 503 and `/api/health` shows `model_loaded: false` with the reason in `metadata.probe_load_error`. It never silently serves the legacy CNN, which scores worse than always predicting 10. Set `ALLOW_LEGACY_MODEL=1` (env or `.env`) to fall back to the legacy model at `ACTIVE_MODEL_PATH` instead, e.g. to serve a `smoke.yaml` end-to-end run; the error stays in the health metadata. Artifacts trained before the feature-spec check (no `card_features.json`, no `feature_spec_hash` in `grade_head.json`) still load, with a WARNING.
+The API fails closed: if a probe file is missing or doesn't load (corrupt, or head, feature graph and the running code on different feature specs), `/api/grade` returns 503 and `/api/health` shows `model_loaded: false` with the reason in `metadata.probe_load_error`. It never silently serves the legacy CNN, which scores worse than always predicting 10. Set `ALLOW_LEGACY_MODEL=1` (env or `.env`) to fall back to the legacy model at `ACTIVE_MODEL_PATH` instead, e.g. to serve a `smoke.yaml` end-to-end run; the error stays in the health metadata. Artifacts trained before the feature-spec check (no `card_features.json`, no `feature_spec_hash` in `grade_head.json`) still load, with a WARNING.
 
 ### 1. Start the API
 
@@ -218,8 +218,9 @@ backup. `--mode stratified --reassign` is the old per-grade shuffle
 (`--ebay-split stratify` works only there). `--mode grouped --reassign` is the
 planned one-time re-split (phase 2 of `intent/stable-grouped-split`): every PSA
 cert is re-placed by its card's hash, so no printed card spans train/val/test.
-The first reassign copies the old split into `split_legacy`, which later runs
-never overwrite, so the old numbers stay reproducible.
+The first reassign copies the old split into `split_legacy` (NULL for certs
+that had none); later reassigns leave that column alone, so the old numbers stay
+reproducible.
 
 ### PSA (high-fidelity validation sample)
 

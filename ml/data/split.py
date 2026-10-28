@@ -18,9 +18,9 @@ Modes:
 - `grouped --reassign`: every PSA cert re-placed by the hash of its card, so no
   printed card spans train/val/test.
 
-`--reassign` rewrites existing assignments; the old ones are kept in
-`split_legacy` (first reassign only). In sticky and grouped mode an eBay cert of
-a card with a PSA test cert gets 'excluded', which no loader reads.
+`--reassign` rewrites existing assignments; the first reassign keeps the old
+ones in `split_legacy` and later ones leave it alone. In sticky and grouped mode
+an eBay cert of a card with a PSA test cert gets 'excluded', which no loader reads.
 """
 
 from __future__ import annotations
@@ -221,6 +221,12 @@ def _read_rows(conn: sqlite3.Connection) -> list[SplitRow]:
     ]
 
 
+def _has_legacy_split(conn: sqlite3.Connection) -> bool:
+    """True once a reassign has recorded the original assignment in `split_legacy`."""
+    sql = "SELECT 1 FROM certs WHERE split_legacy IS NOT NULL LIMIT 1"
+    return conn.execute(sql).fetchone() is not None
+
+
 def _assign_and_log(
     rows: list[SplitRow],
     mode: str,
@@ -299,9 +305,10 @@ def main(
             log.warning("no eligible certs - run `collect` first")
             return
         assignments = _assign_and_log(rows, mode, val_frac, test_frac, seed, salt, ebay_split)
-        if reassign:
-            # Keep the original assignment once; a later reassign doesn't overwrite it.
-            conn.execute("UPDATE certs SET split_legacy=split WHERE split_legacy IS NULL")
+        if reassign and not _has_legacy_split(conn):
+            # Keep the original assignment, on the first reassign only: a later one
+            # would record certs that had no split then (NULL) as having its result.
+            conn.execute("UPDATE certs SET split_legacy=split")
         conn.executemany(
             "UPDATE certs SET split=? WHERE cert_number=?",
             [(assignments[r.cert], r.cert) for r in rows if assignments[r.cert] != r.current_split],

@@ -69,8 +69,10 @@ _CROP_STATUS_COLUMNS = {
 }
 
 
-# The `split` a cert had before its first `split.py --reassign`, so the numbers
-# measured on the old assignment stay reproducible. Written once, never updated.
+# The `split` a cert had before the first `split.py --reassign`, so the numbers
+# measured on the old assignment stay reproducible. Written once, by that first
+# reassign only (NULL: the cert had no split then, or arrived later); a later
+# reassign leaves the whole column alone.
 _SPLIT_COLUMNS = ("split_legacy",)
 
 
