@@ -70,7 +70,7 @@ Model selection in `GradeInferenceService.__init__`:
 
 ### Docs
 
-- README and CLAUDE.md: the API needs the probe files; `ALLOW_LEGACY_MODEL=1` opts into the legacy CNN, next to the `smoke.yaml` end-to-end check (which serves the legacy model). `smoke.yaml` itself is unchanged.
+- README and CLAUDE.md: the API needs the probe files; `ALLOW_LEGACY_MODEL=1` opts into the legacy CNN, next to the `smoke.yaml` end-to-end check. The opt-in only applies when no probe model loads; to serve a freshly exported legacy model, pass its `model_path` or move the probe files aside (2026-10-27 re-test). `smoke.yaml` itself is unchanged.
 - The served model directory needs `card_features.json` beside `card_features.onnx` after the real run. Artifacts without it still load, with a WARNING, as long as the head has no `feature_spec_hash` either (2026-10-27: a head with a hash and no sidecar fails closed).
 
 ## Out of scope
