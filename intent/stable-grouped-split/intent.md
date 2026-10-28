@@ -141,3 +141,10 @@ All tests build their own DB in `tmp_path` via `ml.data.db.connect`. None of the
 - **Test-set policy** (open question 9): yes; written into CLAUDE.md in this round (see Docs).
 - **Delivery:** one PR together with [[probe-artifact-consistency]], this spec first. Its `train_probe` report fields (`test_seen_cards`, `n_test_seen`) are checked by the single real `train_probe` run at the end of that spec.
   - 2026-10-27, checked: the real run wrote `n_test_seen` 251 and `test_seen_cards` (n 251, MAE 0.4143) to the report and the head metadata, beside `test_unseen_cards` (n 137, MAE 0.6277). 251 of 388 matches the straddle count above.
+
+## Owner decisions (2026-10-27, round 3)
+
+- **Phase 2 approved** (open question 1): run `--mode grouped --reassign` on the real DB this round, after a fresh DB backup (`data/backups/pre-grouped-split.sqlite`) and a `data/models` backup.
+- **Salt stays `pokescan-split-v1`.** The 47 test certs graded ≤8 (simulated 49–61) are accepted; trying other salts until the test set looks nicer would be choosing the test set by hand.
+- **No tolerance on the new metrics**: the test set and the fit set both change. Sanity check only: card-grouped CV MAE within ±0.02 of 0.4467 (CV is already card-grouped, so it should barely move); stop and report if it doesn't.
+- The new ADR (`docs/adr/0002-card-grouped-test-split.md`) becomes the baseline [[face-side-orientation-guard]] measures against.
