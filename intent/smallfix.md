@@ -88,3 +88,9 @@ Follow-ups from the [[serve-input-normalization]] review (2026-10-23; not done):
 - [ ] Square photos (`w == h`) are never retried: `preprocess.py:575` uses a strict `>`. Either list square photos under the spec's accepted cost, or use `>=` (no stored photo is square) and add a test pinning it.
 - [ ] The slow byte-identical test (`backend/tests/test_preprocess.py:393-400`) doesn't assert how many fallback faces it covers. Add `assert len(fallbacks) == 21` (or at least non-empty) so missing files can't make it check fewer, down to zero.
 - [ ] Cosmetic: 3 blank lines before `test_sideways_card_in_portrait_photo_is_not_retried` (`test_preprocess.py:210`).
+
+## 11. Split follow-ups (2026-10-27)
+
+From the [[stable-grouped-split]] implementation.
+
+- [ ] `ml/data/collect.py:67` upserts `"split": None`, so re-scanning an already-collected PSA cert range resets those certs' `split` to NULL, and the next sticky split re-places them (a test cert can move). `ebay_collect` skips existing certs, so it isn't affected. Drop `split` from the row dict (and check `db.upsert` then leaves the column alone on conflict); add a `tmp_path` test that re-upserting a cert keeps its split.
