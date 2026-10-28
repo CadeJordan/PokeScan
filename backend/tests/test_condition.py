@@ -211,3 +211,16 @@ def test_condition_picks_min_per_factor(monkeypatch):
     monkeypatch.setattr(condition, "_analyze_side", lambda _c: next(sides))
     res = compute_condition_subgrades(b"front", b"back")
     assert (res.corners.grade, res.edges.grade, res.surface.grade) == (7.0, 5.0, 10.0)
+
+
+def test_accepts_detected_crops_without_detecting_again(monkeypatch):
+    clean = to_jpeg_bytes(make_scene(seed=0, card=make_card(seed=0)).bgr)
+    damaged = to_jpeg_bytes(make_scene(seed=0, card=scratched(make_card(seed=0))).bgr)
+    expected = compute_condition_subgrades(clean, damaged)
+    crops = detect_and_crop(clean), detect_and_crop(damaged)
+
+    def boom(*_a, **_k):
+        raise AssertionError("detect_and_crop must not run when given a CardCrop")
+
+    monkeypatch.setattr(condition, "detect_and_crop", boom)
+    assert compute_condition_subgrades(*crops) == expected

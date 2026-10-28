@@ -1,6 +1,6 @@
 "use client";
 
-import type { GradeResponse } from "@/app/api-client";
+import type { CenteringSubGrade, GradeResponse } from "@/app/api-client";
 
 type Props = { result: GradeResponse };
 
@@ -10,6 +10,15 @@ const confidenceLabel = (c: number): string => {
   if (c >= 0.7) return "High";
   if (c >= 0.4) return "Medium";
   return "Low";
+};
+
+// One line per measured face; the grade is the worse face, so show both.
+const centeringHint = (c: CenteringSubGrade | null): string | undefined => {
+  const lines = [
+    c?.left_right && `front ${c.left_right} L/R · ${c.top_bottom} T/B`,
+    c?.back_left_right && `back ${c.back_left_right} L/R · ${c.back_top_bottom} T/B`,
+  ].filter(Boolean);
+  return lines.length ? lines.join("\n") : undefined;
 };
 
 const GradeResult = ({ result }: Props) => {
@@ -69,11 +78,7 @@ const GradeResult = ({ result }: Props) => {
           <SubGradeCell
             label="Centering"
             value={sub_grades.centering?.grade ?? null}
-            hint={
-              sub_grades.centering?.left_right
-                ? `${sub_grades.centering.left_right} L/R · ${sub_grades.centering.top_bottom} T/B`
-                : undefined
-            }
+            hint={centeringHint(sub_grades.centering)}
           />
           <SubGradeCell
             label="Corners"
@@ -219,7 +224,7 @@ const SubGradeCell = ({
         {has ? (value as number).toFixed(1) : "—"}
       </span>
       {hint && (
-        <span className="font-mono text-[10px] text-zinc-500">{hint}</span>
+        <span className="whitespace-pre-line font-mono text-[10px] text-zinc-500">{hint}</span>
       )}
     </div>
   );

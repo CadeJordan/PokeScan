@@ -78,8 +78,8 @@ def draw_detection(
 
 def draw_centering(
     rgb: np.ndarray,
-    measured: tuple[int, int, int, int],
-    expected: tuple[int, int, int, int] | None = None,
+    measured: tuple[float, float, float, float],
+    expected: tuple[float, float, float, float] | None = None,
     title: str = "",
 ) -> np.ndarray:
     """Draw inner-frame borders on a warped crop. Tuples are (left, right, top, bottom)."""
@@ -87,7 +87,7 @@ def draw_centering(
     h, w = img.shape[:2]
 
     def lines(b, colour, dashed=False):
-        left, right, top, bottom = b
+        left, right, top, bottom = (round(v) for v in b)
         segs = [
             ((left, 0), (left, h - 1)),
             ((w - right, 0), (w - right, h - 1)),

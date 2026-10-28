@@ -15,7 +15,7 @@ Run all Python commands from `PokeScan/`. Modules are invoked as `python -m ...`
 Interpreter: `.venv` is currently near-empty. The working environment is the global pyenv Python 3.11.6, where `pokescan` is installed editable (torch 2.5.1+cu121). Use plain `python` and don't activate `.venv` until `intent/pinned-dev-environment` lands. Don't install or upgrade packages in the global env without asking.
 
 ```powershell
-# API (needs data/models/grade_model.onnx, else /api/grade returns 503)
+# API (needs data/models/grade_head.npz + card_features.onnx (probe) or grade_model.onnx (legacy), else /api/grade returns 503)
 uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000
 
 # Frontend (PokeScan/frontend; reads NEXT_PUBLIC_API_BASE from .env.local)
@@ -24,35 +24,27 @@ npm run preview    # Cloudflare runtime via OpenNext; npm run deploy to ship
 
 # Lint / tests (testpaths: backend/tests, ml/tests)
 ruff check .
-python -m pytest -m "not slow and not visual and not model"   # fast suite, ~3 min; baseline 248 passed, 3 xfailed
+python -m pytest -m "not slow and not visual and not model"   # fast suite, ~2 min; baseline 398 passed, 2 xfailed
 python -m pytest path/to/test_file.py::test_name
 # markers: slow (sweeps, full test-split eval), model (needs data/models/grade_model.onnx, else skips),
 #          visual (writes overlays to test-artifacts/overlays/)
-
-# Data collection
-python -m ml.data.ebay_collect --grades 6 7 8 9 10 --per-grade 500
-python -m ml.data.collect --start-cert 90000000 --count 90          # single PSA token
-python -m ml.data.collect_all --starts <6 comma-separated certs> --count 5000 --daily-limit 200 --daily-limit-token0 1000
-
-# Training pipeline (order matters)
-python -m ml.data.split                 # assigns certs.split = train/val/test (stratified by grade)
-python -m ml.data.precrop               # dewarp to data/crops/; rerun after new harvests (--force to rebuild)
-python -m ml.data.precompute_factors    # only for multitask: CV pseudo-labels into certs table
-python -m ml.training.train --config ml/training/configs/mvp.yaml   # or multitask.yaml / mvp_8gb.yaml / smoke.yaml
-python -m ml.training.export --checkpoint data/models/checkpoints/best-XX.ckpt
 ```
+
+Data collection and the training pipeline (run in order: split → precrop → `python -m ml.training.train_probe`; the legacy CNN path is precompute_factors → train → export): see `README.md`. Evaluate models with card-grouped CV (`train_probe` does): 302 printed cards span the per-cert train/val/test split, so plain split numbers leak card identity.
 
 `smoke.yaml` is the fast end-to-end check (train → checkpoint → export → serve). Restart the API after exporting — the model is loaded once at startup.
 
 ## Architecture
 
-**Inference path** (`backend/app/`): `api/grade.py` → `ml/inference.py` (`GradeInferenceService` singleton wrapping one ONNX Runtime session) → `ml/preprocess.py::detect_and_crop` (classical-CV quad detection + perspective warp to 600×840, with a padded fallback when no quad is found). The ONNX graph takes inputs `front`/`back` and outputs `corn_logits` (9 values); inference turns them into cumulative probs, hard rank `1 + sum(p>0.5)`, soft grade `1 + sum(p)`, and per-class confidence.
+**Inference path** (`backend/app/`): `api/grade.py` → `ml/inference.py` (`GradeInferenceService` singleton) → `ml/preprocess.py::detect_and_crop` (classical-CV quad detection + perspective warp to 600×840, with a padded fallback when no quad is found). The service loads the **probe model** when `data/models/grade_head.npz` and `card_features.onnx` both exist, else the **legacy** CORN `grade_model.onnx` (also forced by passing `model_path`).
 
-**Sub-grades are classical CV, not the network**: `ml/centering.py` (front only) and `ml/condition.py` (corners/edges/surface; worse side wins). The endpoint computes them independently and swallows their failures into `notes`, so a CV failure never fails the request. `ml/defects.py` (YOLO) and `ml/multitask.py` are Phase C hooks; `defects.py` is inert until weights exist.
+**Probe model** (default, `ml/features.py` + `ml/grade_head.py`): frozen DINOv2-B (`card_features.onnx`, input 602×434) → per face 11 region vectors (CLS, mean, 4 corners, 4 edge strips, centre) → four proportional-odds probes (corners / edges / surface / global, both faces) → meta proportional-odds probe over their soft grades. Scaler+PCA are folded into each probe's weight vector, so the head is plain numpy. Trained by `python -m ml.training.train_probe` (`ml/training/probe.py` holds the fitting; card-grouped CV, nested OOF for the meta probe). Proportional odds is monotone by construction, so the CORN `cummin` question below doesn't apply to it.
 
-**Model** (`backend/app/ml/model.py`): shared-weight timm ConvNeXt backbone over front and back, features blended with `front_weight`, single linear CORN head. The training code in `ml/` imports this model from `backend`, so the backend package is the source of truth for the architecture. Multitask training adds corners/edges/surface heads supervised by pseudo-labels from `condition.py`, but the served API still uses classical CV for those sub-grades.
+**Sub-grades**: with the probe model, corners/edges/surface are the region probes' soft grades (learned from overall grade, not PSA sub-grades); otherwise classical CV from `ml/condition.py`, whose factors were measured to have ~zero correlation with grade. `ml/centering.py` measures border widths on both faces from colour runs and returns None for a face it can't measure (most full-art/silver/Japanese fronts) rather than guessing; the API notes it. The endpoint swallows sub-grade failures into `notes`, so a CV failure never fails the request. `ml/defects.py` (YOLO) and `ml/multitask.py` are Phase C hooks for the legacy CNN.
 
-**Export** (`ml/training/export.py`) fits temperature scaling on val (`calibrate.py`) and bakes it into the ONNX graph, writing `grade_model.onnx` plus a `grade_model.json` sidecar that `/api/health` returns as `metadata`.
+**Legacy model** (`backend/app/ml/model.py`): shared-weight timm ConvNeXt over front and back, single linear CORN head; trained by `ml/training/train.py` + `export.py`. It collapsed towards a constant grade on this data (worse than always predicting 10); kept only as a fallback.
+
+**Export** (legacy model only; `ml/training/export.py`) fits temperature scaling on val (`calibrate.py`) and bakes it into the ONNX graph, writing `grade_model.onnx` plus a `grade_model.json` sidecar that `/api/health` returns as `metadata`. The probe model has no post-hoc calibration and needs none: its out-of-fold NLL-optimal temperature is 1.00.
 
 **Data** (`ml/data/`): one SQLite `certs` table (`db.py`) is the hub — collectors upsert into it (`cert_number` is the PSA number or `ebay:<itemId>`, `source` is `psa`|`ebay`), `split.py` writes `split`, `precrop.py` writes cropped paths, `precompute_factors.py` writes `*_subgrade` columns, and `dataset.py` reads it all. `db.py` migrates columns on connect, so add new columns there. PSA API quota is tight (~100–200 calls/day/token, ~2 calls per Pokémon hit); `psa_client.py` tracks quota and honors `Retry-After`. eBay is the bulk source; PSA is the high-fidelity val/test source.
 

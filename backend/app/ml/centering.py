@@ -1,55 +1,96 @@
 """Classical-CV centering measurement.
 
-After the card has been dewarped to a fixed CARD_W x CARD_H canvas, the
-"inner art frame" is detectable as the dominant rectangular gradient inside
-the card border. We:
+Centering is the ratio of opposite border widths. On the dewarped
+CARD_W x CARD_H crop, for each side:
 
-1. Convert to grayscale, take the gradient magnitude.
-2. Project gradient energy onto the X and Y axes.
-3. Find the strongest left/right peaks within a plausible band (skipping the
-   outer ~3% which is the white border itself), and likewise top/bottom.
-4. Compute L/R and T/B ratios out of 100 and map to a centering grade using
-   PSA's published tolerances.
+1. Take colour profiles running inward from the side (Lab, lines spanning the
+   middle 76% of the side so rounded corners don't interfere).
+2. The border colour is the dominant colour of the outer bands of all four
+   sides pooled (mode-seeking mean shift), refined per side for lighting; each
+   pixel's distance to it gives a profile per line.
+3. Per chunk of lines (three per side), take a low percentile of that distance
+   over lines at each depth. Text printed on the border (the copyright line on
+   modern cards) or art reaching into it only affects a minority of lines, so
+   the percentile profile stays border-like across the whole border.
+4. The border is the run of border-like depths starting near the crop edge
+   (slab photos often include a few px of gasket outside the card). Its inner
+   and outer edges are the half-contrast crossings into what is next to it.
+   A gasket close to the border colour can join the run, or capture the
+   per-side colour when it is wider than a narrow border; both are detected
+   and split off (see `_border_edges`, `_side_width`).
+5. A side is measured when at least two chunks give widths that agree; a face
+   when all four sides are.
 
-This is geometry, not learning - no labels needed. It's the right tool for
-this sub-task, and it produces interpretable ratios you can show in the UI.
+Faces that can't be measured confidently (full-art or silver-bordered cards
+whose border blends into the art, heavy glare) return None instead of a
+guess. Checked on 2,434 PSA slab photos (a real PSA 10 is within 60/40 front
+and 75/25 back): the previous gradient-projection method put 44% of PSA 10
+fronts outside 60/40 and 17% outside 70/30. This one measures 81% of backs
+(0 of 1,234 PSA 10s outside 75/25) but only ~17% of fronts - it abstains on
+most full-art, silver-bordered and Japanese fronts - and of the PSA 10 fronts
+it does measure, 6% fall outside 60/40 and 4% outside 70/30.
+
+PSA tolerances: front 60/40 for a 10 down to 90/10 for a 3; back 75/25 for a
+10 and 90/10 for 9 and below; past 90/10 on either face, a 1. The worse face
+decides.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
 
-from backend.app.api.grade import CenteringSubGrade
-from backend.app.ml.preprocess import CARD_H, CARD_W, detect_and_crop
+from backend.app.ml.preprocess import CARD_H, CARD_W, CardCrop, detect_and_crop
+
+if TYPE_CHECKING:
+    from backend.app.api.grade import CenteringSubGrade
+
+SIDES = ("left", "right", "top", "bottom")
+_DEPTH = 0.16             # search depth from each side, x card width
+_SPAN = (0.12, 0.88)      # part of each side used (skips the rounded corners)
+_BAND = 0.07              # outer band that defines the border colour, x card width
+_MAX_START = 18           # px: the border must start this close to the crop edge
+_TOL = 12.0               # Lab distance for a pixel to count as border colour
+_PERCENTILE = 35
+_CHUNKS = 3
+_AGREE_PX, _AGREE_FRAC = 3.0, 0.15  # chunk widths agree within max(px, frac x width)
+_MIN_CONTRAST = 8.0       # border vs. inside, in Lab distance
+_STEP = 6.0               # Lab jump that splits a gasket off a border-like run
+_MIN_GASKET = 3           # px
 
 
 @dataclass(slots=True)
 class CenteringResult:
-    left: int
-    right: int
-    top: int
-    bottom: int
+    left: float
+    right: float
+    top: float
+    bottom: float
     grade: float
 
     @property
     def lr_ratio(self) -> tuple[int, int]:
-        total = max(1, self.left + self.right)
+        total = max(1e-6, self.left + self.right)
         left = round(self.left / total * 100)
         return left, 100 - left
 
     @property
     def tb_ratio(self) -> tuple[int, int]:
-        total = max(1, self.top + self.bottom)
+        total = max(1e-6, self.top + self.bottom)
         t = round(self.top / total * 100)
         return t, 100 - t
 
+    @property
+    def worst_pct(self) -> int:
+        return max(max(self.lr_ratio), max(self.tb_ratio))
 
-# PSA tolerances per the public grading guide. Worst side dictates the bucket.
-# Values are the maximum off-centeredness percentage allowed for that grade.
-# e.g. 60 means up to 60/40, 70 means up to 70/30. Front-of-card values.
+
+# PSA tolerances per the public grading guide: the highest grade each
+# off-centeredness allows, e.g. 60 means up to 60/40. Grades sharing a
+# tolerance with the grade above are left out (4 is 85/15 like 5, 2 is 90/10
+# like 3); past 90/10 only a 1 is possible.
 _PSA_TOLERANCES = [
     (10, 60),
     (9, 65),
@@ -57,94 +98,247 @@ _PSA_TOLERANCES = [
     (7, 75),
     (6, 80),
     (5, 85),
-    (4, 90),
-    (3, 95),
+    (3, 90),
 ]
+_PSA_BACK_TOLERANCES = [(10, 75), (9, 90)]
 
 
-def _grade_from_ratio(worst_side_pct: int) -> float:
+def _grade_from_ratio(worst_side_pct: int, face: str = "front") -> float:
     """Map the worse of L/R or T/B (the higher of the two sides) to a grade."""
-    for grade, threshold in _PSA_TOLERANCES:
+    table = _PSA_TOLERANCES if face == "front" else _PSA_BACK_TOLERANCES
+    for grade, threshold in table:
         if worst_side_pct <= threshold:
             return float(grade)
-    return 2.0
+    return 1.0
 
 
-def _find_inner_edges(rgb: np.ndarray) -> tuple[int, int, int, int]:
-    """Find the inner art-frame edges as pixel coordinates.
+def _profiles(lab: np.ndarray, side: str) -> np.ndarray:
+    """(lines, depth, 3) Lab profiles running inward from `side`."""
+    h, w = lab.shape[:2]
+    d = int(_DEPTH * w)
+    if side == "left":
+        p = lab[int(_SPAN[0] * h) : int(_SPAN[1] * h), :d]
+    elif side == "right":
+        p = lab[int(_SPAN[0] * h) : int(_SPAN[1] * h), w - d :][:, ::-1]
+    elif side == "top":
+        p = lab[:d, int(_SPAN[0] * w) : int(_SPAN[1] * w)].transpose(1, 0, 2)
+    else:
+        p = lab[h - d :, int(_SPAN[0] * w) : int(_SPAN[1] * w)][::-1].transpose(1, 0, 2)
+    return np.ascontiguousarray(p)
 
-    Returns (left_x, right_x, top_y, bottom_y) measured from the respective
-    card edges (i.e. left_x is distance from the LEFT card edge).
+
+def _dominant(
+    pixels: np.ndarray, start: np.ndarray | None = None, radii=(40.0, 25.0, 15.0, 10.0)
+) -> np.ndarray:
+    """Mode of a colour cloud: mean shift from `start` (default: the median)."""
+    c = np.median(pixels, axis=0) if start is None else start
+    for radius in radii:
+        for _ in range(8):
+            near = np.linalg.norm(pixels - c, axis=1) < radius
+            if near.sum() < 20:
+                break
+            c = pixels[near].mean(0)
+    return c
+
+
+def _crossing(dist: np.ndarray, i: int, target: float, step: int) -> float:
+    """Sub-pixel position where `dist` rises above `target` walking from i by `step`."""
+    j = i
+    while 0 <= j + step < len(dist) and dist[j + step] < target:
+        j += step
+    k = j + step
+    if not 0 <= k < len(dist) or dist[k] == dist[j]:
+        return j + 0.5 * step
+    return j + step * float(np.clip((target - dist[j]) / (dist[k] - dist[j]), 0, 1))
+
+
+def _step(colours: np.ndarray, start: int, end: int) -> int | None:
+    """Gasket step: the sharpest colour step in the outer _MAX_START px of a run
+    [start, end] that starts at the crop edge, as the index of the first pixel
+    past it, or None. Each side must be steady colour (the outer part at least
+    _MIN_GASKET px, so a card's anti-aliased edge pixel doesn't count), with up
+    to two px of blend between them (anti-aliasing, JPEG, slight blur).
     """
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-    mag = cv2.magnitude(gx, gy)
+    if start > 2:
+        return None
+    best, best_k = 0.0, None
+    for k in range(start + _MIN_GASKET + 1, min(end - 1, start + _MAX_START)):
+        jump = float(np.linalg.norm(colours[k + 1] - colours[k - 2]))
+        if jump > best:
+            best, best_k = jump, k
+    if best_k is None or best < _STEP:
+        return None
+    # The run's last px blend into what is inside the border; leave them out.
+    outer, inner = colours[start : best_k - 1], colours[best_k + 1 : max(best_k + 3, end - 1)]
+    contrast = float(np.linalg.norm(np.median(outer, 0) - np.median(inner, 0)))
+    spread = max(
+        float(np.linalg.norm(seg - np.median(seg, 0), axis=1).max()) for seg in (outer, inner)
+    )
+    return best_k if contrast >= _STEP and spread < 0.5 * contrast else None
 
-    h, w = mag.shape
-    # Project gradient energy onto each axis.
-    col_energy = mag.sum(axis=0)
-    row_energy = mag.sum(axis=1)
 
-    # The outermost 3% on each side is the white card border itself; skip it
-    # so we lock onto the inner art frame, not the outer card edge.
-    pad_x = max(2, int(round(w * 0.03)))
-    pad_y = max(2, int(round(h * 0.03)))
+def _step_crossing(colours: np.ndarray, k: int, start: int, end: int) -> float:
+    """Sub-pixel position of the step at k: walking outward from its inner side,
+    where the colour is halfway to the outer side's."""
+    co = np.median(colours[start : k - 1], 0)
+    ci = np.median(colours[k + 1 : max(k + 3, end - 1)], 0)
+    t = (colours - co) @ (ci - co) / float((ci - co) @ (ci - co))
+    return _crossing(1.0 - t, k + 1, 0.5, -1) + 0.5
 
-    # Search inward from each side for the first column/row whose energy
-    # crosses 60% of the local maximum within a search window of ~25% of the
-    # card dimension. This is a robust proxy for "where does the inner frame
-    # start", and avoids being fooled by glare or background gradients.
-    def _scan(profile: np.ndarray, start: int, end: int, forward: bool) -> int:
-        seg = profile[start:end]
-        if seg.size == 0:
-            return start
-        threshold = float(seg.max()) * 0.6
-        idxs = np.where(seg >= threshold)[0]
-        if idxs.size == 0:
-            return start + (seg.argmax() if forward else seg.size - 1 - seg[::-1].argmax())
-        return start + (idxs[0] if forward else idxs[-1])
 
-    band_x = max(8, int(round(w * 0.25)))
-    band_y = max(8, int(round(h * 0.25)))
+def _border_edges(
+    dist: np.ndarray, colours: np.ndarray, ref: np.ndarray | None
+) -> tuple[float, float, bool] | None:
+    """(outer, inner, gasket split off) from a distance-to-border-colour profile.
 
-    left_x = _scan(col_energy, pad_x, pad_x + band_x, forward=True)
-    right_x = _scan(col_energy, w - pad_x - band_x, w - pad_x, forward=False)
-    top_y = _scan(row_energy, pad_y, pad_y + band_y, forward=True)
-    bottom_y = _scan(row_energy, h - pad_y - band_y, h - pad_y, forward=False)
+    `colours` is the matching Lab profile and `ref` the border colour pooled
+    over all four sides (None: don't look for a gasket). A gasket or slab edge
+    outside the card can be close enough to the border colour to join its run;
+    if the run's outer part is a separate steady colour further from `ref`
+    than the rest, the border starts at the step between them.
+    """
+    near = np.flatnonzero(dist[:_MAX_START] < _TOL)
+    if not len(near):
+        return None
+    start = end = int(near[0])
+    # Extend through the border, bridging single-pixel dropouts.
+    while end + 1 < len(dist) and (
+        dist[end + 1] < _TOL or (end + 2 < len(dist) and dist[end + 2] < _TOL)
+    ):
+        end += 1
+    if end - start < 3 or end + 12 >= len(dist):
+        return None
+    outer = None
+    k = None if ref is None else _step(colours, start, end)
+    if k is not None:
+        outer_c = np.median(colours[start : k - 1], 0)
+        inner_c = np.median(colours[k + 1 : max(k + 3, end - 1)], 0)
+        if np.linalg.norm(inner_c - ref) < np.linalg.norm(outer_c - ref):
+            # The outer part lies outside the card: the border starts at the step.
+            outer = _step_crossing(colours, k, start, end)
+            start = k + 1
+    split = outer is not None
+    if end - start < 2:
+        return None
+    plateau = float(np.median(dist[start : end + 1]))
+    inside = float(np.median(dist[end + 4 : end + 12]))
+    if inside - plateau < _MIN_CONTRAST:
+        return None
+    inner = _crossing(dist, end, 0.5 * (plateau + inside), +1) + 0.5
+    if outer is None:
+        outer = 0.0
+        if start > 0:
+            outside = float(np.median(dist[max(0, start - 4) : start]))
+            if outside > plateau:
+                outer = _crossing(dist, start, 0.5 * (plateau + outside), -1) + 0.5
+    return outer, inner, split
 
-    left = max(0, left_x)
-    right = max(0, w - right_x)
-    top = max(0, top_y)
-    bottom = max(0, h - bottom_y)
+
+def _chunk_edges(profile: np.ndarray, colour: np.ndarray, ref: np.ndarray) -> list:
+    """(outer, inner) border edges for each chunk of lines where they're clear."""
+    dist = np.linalg.norm(profile - colour, axis=2)
+    chunks = [
+        (np.percentile(dist[c], _PERCENTILE, axis=0), np.median(profile[c], axis=0))
+        for c in np.array_split(np.arange(len(dist)), _CHUNKS)
+    ]
+    edges = [_border_edges(d, c, ref) for d, c in chunks]
+    if not all(e is not None and e[2] for e in edges):
+        # A gasket runs the whole side: a step in only some chunks is lighting
+        # or wear on the card's own edge, so measure those without splitting.
+        edges = [_border_edges(d, c, None) for d, c in chunks]
+    return [e[:2] for e in edges if e is not None]
+
+
+def _side_width(profile: np.ndarray, band: np.ndarray, pooled: np.ndarray) -> float | None:
+    # Shift the pooled border colour to this side's lighting.
+    local = _dominant(band, start=pooled, radii=(20.0, 12.0))
+    edges = _chunk_edges(profile, local, pooled)
+    if len(edges) >= 2 and np.linalg.norm(local - pooled) > _TOL:
+        # A large shift may instead have locked onto a gasket wider than a
+        # narrow border. Then a pooled-colour border sits at the inner end of
+        # the local run, starting well after it.
+        alt = _chunk_edges(profile, pooled, pooled)
+        if len(alt) >= 2:
+            (lo, li), (ao, ai) = np.median(edges, 0), np.median(alt, 0)
+            if ao >= lo + 2 and ai <= li + 2:
+                edges = alt
+    if len(edges) < 2:
+        return None
+    # At least two chunks must agree: one that disagrees has had art or text
+    # join (or break) its border run. With three chunks the median is in the
+    # closest pair.
+    widths = np.sort([e[1] - e[0] for e in edges])
+    gaps = np.diff(widths)
+    i = int(np.argmin(gaps))
+    if gaps[i] > max(_AGREE_PX, _AGREE_FRAC * widths[i + 1]):
+        return None
+    return float(np.median(widths))
+
+
+def measure_borders(rgb: np.ndarray) -> tuple[float, float, float, float] | None:
+    """(left, right, top, bottom) border widths in px, or None if any side is unclear."""
+    if rgb.shape[:2] != (CARD_H, CARD_W):
+        raise ValueError(f"expected {CARD_H}x{CARD_W} canvas, got {rgb.shape[:2]}")
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    profiles = [_profiles(lab, side) for side in SIDES]
+    bands = [p[:, : int(_BAND * CARD_W)].reshape(-1, 3) for p in profiles]
+    # The border is one ink on all four sides, so pool them: on an off-centre
+    # card the narrow side's band is mostly art, but the wide sides carry it.
+    # A short local mean shift per side then absorbs per-side lighting.
+    pooled = _dominant(np.concatenate(bands))
+    widths = [_side_width(p, band, pooled) for p, band in zip(profiles, bands, strict=True)]
+    if any(w is None for w in widths):
+        return None
+    left, right, top, bottom = widths
     return left, right, top, bottom
 
 
-def measure_centering(rgb: np.ndarray) -> CenteringResult:
-    if rgb.shape[:2] != (CARD_H, CARD_W):
-        raise ValueError(f"expected {CARD_H}x{CARD_W} canvas, got {rgb.shape[:2]}")
-    left, right, top, bottom = _find_inner_edges(rgb)
-    lr_total = max(1, left + right)
-    tb_total = max(1, top + bottom)
-    worst_side_pct = round(
-        max(
-            max(left, right) / lr_total,
-            max(top, bottom) / tb_total,
-        )
-        * 100
-    )
-    grade = _grade_from_ratio(worst_side_pct)
-    return CenteringResult(left=left, right=right, top=top, bottom=bottom, grade=grade)
+def measure_centering(rgb: np.ndarray, face: str = "front") -> CenteringResult | None:
+    borders = measure_borders(rgb)
+    if borders is None:
+        return None
+    left, right, top, bottom = (round(b, 1) for b in borders)
+    res = CenteringResult(left=left, right=right, top=top, bottom=bottom, grade=0.0)
+    res.grade = _grade_from_ratio(res.worst_pct, face)
+    return res
 
 
-def compute_centering_subgrade(image_bytes: bytes) -> CenteringSubGrade:
-    """Public entrypoint used by the API. Crops + measures + returns."""
-    crop = detect_and_crop(image_bytes)
-    res = measure_centering(crop.image)
-    lr = res.lr_ratio
-    tb = res.tb_ratio
+def _ratio(pair: tuple[int, int]) -> str:
+    return f"{pair[0]}/{pair[1]}"
+
+
+def _measure_face(image: bytes | CardCrop, face: str) -> CenteringResult | None:
+    """Measure one face, detecting only when given bytes.
+
+    A fallback crop (no card outline found) is not measured: its "borders"
+    are the padded whole photo, not the card's.
+    """
+    crop = image if isinstance(image, CardCrop) else detect_and_crop(image)
+    if not crop.found_quad:
+        return None
+    return measure_centering(crop.image, face)
+
+
+def compute_centering_subgrade(
+    front: bytes | CardCrop, back: bytes | CardCrop | None = None
+) -> CenteringSubGrade | None:
+    """Public entrypoint used by the API: crop, measure each face, worse face wins.
+
+    Each face is upload bytes or the `CardCrop` the grade model already used.
+    Returns None when neither face could be measured.
+    """
+    # Imported here so this ML module doesn't load the API layer at import time.
+    from backend.app.api.grade import CenteringSubGrade
+
+    front_res = _measure_face(front, "front")
+    back_res = _measure_face(back, "back") if back is not None else None
+    measured = [r.grade for r in (front_res, back_res) if r is not None]
+    if not measured:
+        return None
     return CenteringSubGrade(
-        grade=round(res.grade, 1),
-        left_right=f"{lr[0]}/{lr[1]}",
-        top_bottom=f"{tb[0]}/{tb[1]}",
+        grade=min(measured),
+        left_right=_ratio(front_res.lr_ratio) if front_res else None,
+        top_bottom=_ratio(front_res.tb_ratio) if front_res else None,
+        back_left_right=_ratio(back_res.lr_ratio) if back_res else None,
+        back_top_bottom=_ratio(back_res.tb_ratio) if back_res else None,
     )

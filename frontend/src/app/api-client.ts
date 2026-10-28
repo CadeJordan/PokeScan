@@ -5,6 +5,8 @@ export type CenteringSubGrade = {
   grade: number | null;
   left_right: string | null;
   top_bottom: string | null;
+  back_left_right: string | null;
+  back_top_bottom: string | null;
 };
 
 export type FactorSubGrade = {

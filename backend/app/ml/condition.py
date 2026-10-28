@@ -388,10 +388,15 @@ def _surface_factor(rgb: np.ndarray) -> FactorResult:
 # --------------------------------------------------------------------------- #
 # Public entrypoint (the swap seam)
 # --------------------------------------------------------------------------- #
-def compute_condition_subgrades(front_bytes: bytes, back_bytes: bytes) -> ConditionResult:
-    """Analyze both sides and keep the worse grade per factor (PSA-style)."""
-    front = _analyze_side(detect_and_crop(front_bytes))
-    back = _analyze_side(detect_and_crop(back_bytes))
+def compute_condition_subgrades(
+    front: bytes | CardCrop, back: bytes | CardCrop
+) -> ConditionResult:
+    """Analyze both sides and keep the worse grade per factor (PSA-style).
+
+    Each face is upload bytes (detected here) or an already-detected `CardCrop`.
+    """
+    front = _analyze_side(front if isinstance(front, CardCrop) else detect_and_crop(front))
+    back = _analyze_side(back if isinstance(back, CardCrop) else detect_and_crop(back))
     merged: dict[str, FactorResult] = {}
     for name in FACTOR_NAMES:
         f = front[name]

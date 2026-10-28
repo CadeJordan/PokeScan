@@ -3,8 +3,8 @@
 Wraps a YOLO weights file trained on hand-annotated corner/edge/surface
 defects and produces overlay-friendly detection results to surface in the UI.
 
-Until weights exist on disk, `DefectDetector.ready` is False and the API
-returns an empty defect list - the rest of the pipeline is unaffected.
+Not wired into the API (Phase C hook for the legacy CNN): nothing imports
+it yet. Until weights exist on disk, `DefectDetector.ready` is False.
 """
 
 from __future__ import annotations

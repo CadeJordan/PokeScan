@@ -116,3 +116,69 @@ def test_cors_allows_configured_origin(client):
     )
     assert r.status_code == 200
     assert r.headers["access-control-allow-origin"] in ("http://localhost:3000", "*")
+
+
+def test_grade_uses_region_grades_from_probe_model(client, fake_service, scene_jpeg, monkeypatch):
+    def boom(*_a, **_k):
+        raise AssertionError("classical condition analysis should not run")
+
+    monkeypatch.setattr(condition, "compute_condition_subgrades", boom)
+    fake_service.prediction.region_grades = {
+        "corners": 9.61, "edges": 8.9, "surface": 7.2, "global": 9.0,
+    }
+    r = client.post("/api/grade", files=_files(scene_jpeg, scene_jpeg))
+    assert r.status_code == 200, r.text
+    sub = r.json()["sub_grades"]
+    assert sub["corners"] == {"grade": 9.6, "hint": "clean", "flags": []}
+    assert sub["edges"]["hint"] == "slight wear"
+    assert sub["surface"] == {"grade": 7.2, "hint": "heavy wear", "flags": ["wear"]}
+
+
+def test_centering_reports_both_faces(client, scene_jpeg):
+    r = client.post("/api/grade", files=_files(scene_jpeg, scene_jpeg))
+    c = r.json()["sub_grades"]["centering"]
+    assert c["left_right"] and c["back_left_right"]
+    assert 1.0 <= c["grade"] <= 10.0
+
+
+def test_unmeasurable_centering_is_a_note_not_a_grade(client):
+    import numpy as np
+
+    from backend.tests.helpers.synth import to_jpeg_bytes
+
+    blank = to_jpeg_bytes(np.full((900, 700, 3), 128, np.uint8))
+    r = client.post("/api/grade", files=_files(blank, blank))
+    body = r.json()
+    assert body["sub_grades"]["centering"] is None
+    assert any(n.startswith("centering:") for n in body["notes"])
+
+
+@pytest.mark.parametrize("probe", [True, False], ids=["probe", "legacy"])
+def test_grade_reuses_the_service_crops(client, fake_service, scene_jpeg, monkeypatch, probe):
+    """Each face is detected once per request: sub-grades reuse the model's crops."""
+    import backend.app.ml.centering as centering
+    import backend.app.ml.preprocess as preprocess
+    from backend.app.ml.preprocess import detect_and_crop
+
+    front, back = detect_and_crop(scene_jpeg), detect_and_crop(scene_jpeg)
+    front.rotation = 90
+    fake_service.prediction.crops = (front, back)
+    if probe:
+        fake_service.prediction.region_grades = dict.fromkeys(
+            ("corners", "edges", "surface", "global"), 9.5
+        )
+
+    def boom(*_a, **_k):
+        raise AssertionError("detect_and_crop called again")
+
+    for mod in (preprocess, centering, condition):
+        monkeypatch.setattr(mod, "detect_and_crop", boom)
+    r = client.post("/api/grade", files=_files(scene_jpeg, scene_jpeg))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Sub-grade failures are swallowed into notes, so check they really ran.
+    assert body["sub_grades"]["centering"]["left_right"] is not None
+    assert body["sub_grades"]["corners"] is not None
+    assert "front: photo was sideways; rotated it" in body["notes"]
+    assert not any(n.startswith("back: photo") for n in body["notes"])
+    assert not any("unavailable" in n for n in body["notes"])

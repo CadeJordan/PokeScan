@@ -18,8 +18,24 @@ lands on the card itself for ~94% of fronts and ~98% of backs; most of the
 rest are the slab well/gasket window around the card, which excludes the
 grade label.
 
-Falls back to a simple bounding-box crop if no quad is found, which keeps the
-pipeline robust on cropped/scanned images that already exclude the slab.
+Uploads (bytes or PIL images) are first normalised like ingest
+(`ml.data.image_io`): rotated upright per their EXIF orientation and resized
+to at most `MAX_LONG_EDGE` px on the long edge, so a phone photo reaches the
+detector in the same form as the training photos. The stored training photos
+are already upright and 1024 px, so this is a no-op for them. Numpy arrays are
+not normalised: callers passing arrays own their preprocessing.
+
+The aspect gate only accepts portrait outlines, so when no quad is found in a
+landscape photo (wider than tall, after EXIF transpose and the cap; this
+applies to numpy inputs too) the photo is rotated 90 degrees clockwise and
+searched once more: a card shot sideways is then found, though it may come out
+upside down. Portrait photos are not retried, because there the rotated search
+finds false quads (inner text panels of full-art cards); the cost is that a
+sideways card inside a portrait photo is not found.
+
+If there is still no quad, the whole photo is resized and padded onto the
+canvas (no crop at all), which keeps the pipeline running on images that
+already exclude the slab; callers see `found_quad=False`.
 
 This is intentionally classical (no model dependency at preprocess time).
 A YOLO upgrade is straightforward to swap in later.
@@ -32,10 +48,14 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 CARD_W = 600
 CARD_H = 840
+# Long-edge cap for uploads. Must equal `ml.data.image_io.IMAGE_MAX_LONG_EDGE`,
+# the cap applied to every training photo at ingest.
+MAX_LONG_EDGE = 1024
+_EXIF_ORIENTATION = 0x0112
 
 
 @dataclass(slots=True)
@@ -46,9 +66,15 @@ class CardCrop:
     # `quad` is the 4-point card outline (tl, tr, br, bl) in source pixels;
     # `contour` is the full external contour (pre-approxPolyDP) for fidelity in
     # corner/edge geometry analysis; `source_bgr` is the decoded source image.
+    # All three are in the frame of `source_bgr`, i.e. after `rotation`.
     quad: np.ndarray | None = None
     contour: np.ndarray | None = None
     source_bgr: np.ndarray | None = None
+    # Degrees clockwise the photo was rotated before the quad was found (0 or
+    # 90, see the sideways retry), and the normalised / decoded size ratio
+    # from `decode_image` (1.0 when not resized, and for numpy inputs).
+    rotation: int = 0
+    scale: float = 1.0
 
 
 def _order_quad(pts: np.ndarray) -> np.ndarray:
@@ -504,23 +530,59 @@ def _resize_pad(bgr: np.ndarray) -> np.ndarray:
     return canvas
 
 
+def decode_image(image: bytes | bytearray | Image.Image) -> tuple[np.ndarray, float]:
+    """Decode an upload the way ingest stores photos; returns `(bgr, scale)`.
+
+    EXIF orientation is applied, then the image is converted to RGB (alpha is
+    dropped) and, if its long edge exceeds `MAX_LONG_EDGE`, resized with
+    LANCZOS to exactly that, rounding like `ml.data.image_io.compress_jpeg`.
+    `scale` is the normalised size over the decoded size, 1.0 when not resized.
+    """
+    pil = Image.open(io.BytesIO(image)) if isinstance(image, (bytes, bytearray)) else image
+    # Both calls copy the image even when there is nothing to do, which costs
+    # ~10 ms on a 12 MP photo, so skip them when they're no-ops.
+    if pil.getexif().get(_EXIF_ORIENTATION, 1) != 1:
+        pil = ImageOps.exif_transpose(pil)
+    if pil.mode != "RGB":
+        pil = pil.convert("RGB")
+    w, h = pil.size
+    longest = max(w, h)
+    scale = 1.0
+    if longest > MAX_LONG_EDGE:
+        scale = MAX_LONG_EDGE / longest
+        pil = pil.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
+    return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR), scale
+
+
 def detect_and_crop(image: np.ndarray | bytes | Image.Image) -> CardCrop:
     """Detect the card in `image` and return a 600x840 RGB crop.
 
-    Accepts a numpy BGR/RGB array, raw bytes, or a PIL image.
+    Accepts raw bytes or a PIL image, which are normalised by `decode_image`,
+    or a numpy RGB array, which is used as is (the caller owns its
+    orientation and resolution).
     """
-    if isinstance(image, (bytes, bytearray)):
-        pil = Image.open(io.BytesIO(image)).convert("RGB")
-        bgr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-    elif isinstance(image, Image.Image):
-        bgr = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
+    scale = 1.0
+    if isinstance(image, (bytes, bytearray, Image.Image)):
+        bgr, scale = decode_image(image)
     else:
         if image.ndim != 3 or image.shape[2] != 3:
             raise ValueError("expected HxWx3 image")
         # We assume incoming numpy arrays are RGB unless they're flagged otherwise.
         bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
+    rotation = 0
     found = _find_card_quad(bgr)
+    if found is None and bgr.shape[1] > bgr.shape[0]:
+        # Sideways card: a landscape outline fails the aspect gate, so look
+        # again with the photo turned portrait. Only landscape photos are
+        # retried: on upright portrait photos the rotated search locks onto
+        # inner panels of full-art cards (2 of the 21 stored fallback faces),
+        # and every stored photo is portrait. Everything downstream (quad,
+        # contour, source_bgr) is in the rotated frame.
+        rotated = cv2.rotate(bgr, cv2.ROTATE_90_CLOCKWISE)
+        found = _find_card_quad(rotated)
+        if found is not None:
+            bgr, rotation = rotated, 90
     if found is not None:
         quad, contour = found
         warped = _warp_to_canvas(bgr, quad)
@@ -531,11 +593,13 @@ def detect_and_crop(image: np.ndarray | bytes | Image.Image) -> CardCrop:
             quad=quad,
             contour=contour,
             source_bgr=bgr,
+            rotation=rotation,
+            scale=scale,
         )
 
     fallback = _resize_pad(bgr)
     rgb = cv2.cvtColor(fallback, cv2.COLOR_BGR2RGB)
-    return CardCrop(image=rgb, found_quad=False, source_bgr=bgr)
+    return CardCrop(image=rgb, found_quad=False, source_bgr=bgr, scale=scale)
 
 
 def encode_jpeg(rgb: np.ndarray, quality: int = 92) -> bytes:
