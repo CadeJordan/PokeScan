@@ -56,15 +56,24 @@ Head metadata gains `feature_spec_hash` and `feature_spec`. Keep every existing 
 - If both the head metadata and the sidecar have a `feature_spec_hash` and they differ, raise `ValueError` naming both hashes.
 - If either side has no hash (artifacts from before this spec), log a WARNING and continue, so existing artifacts keep loading.
 
-### Visible failure
+### Fail closed (owner decision, [[cv-ml-improvement-plan]] open question 3)
 
-When probe loading raises, keep today's fallback behaviour; changing it is [[cv-ml-improvement-plan]] open question 3. Also:
-- store the error string;
-- have `metadata` include `"probe_load_error": "<type>: <message>"`. It's additive and appears in `/api/health`.
+Model selection in `GradeInferenceService.__init__`:
+
+- An explicit `model_path` loads the legacy model, as today (`ml.eval.evaluate --model-path`, tests). It's a deliberate choice, so it's not gated.
+- Otherwise the probe is the only model served. If either probe file is missing, or loading raises (corrupt file, D mismatch, `feature_spec_hash` mismatch), the service is **not ready**: `/api/grade` returns 503 (the existing `service.ready` check) and the legacy model is not loaded.
+- `ALLOW_LEGACY_MODEL=1` (a `Settings` field, `allow_legacy_model: bool = False`) restores today's behaviour: when the probe is missing or fails, load the legacy `active_model_path`, logging a WARNING.
+- Either way, store the error and have `metadata` include `"probe_load_error": "<type>: <message>"`, e.g. `"FileNotFoundError: grade_head.npz"` or `"ValueError: feature_spec_hash a1b2… != c3d4…"`. A missing file counts as an error here. `/api/health` then shows `model_loaded: false` (or `true` with the legacy opt-in) plus the error. It's additive.
+- Update the 503 detail in `api/grade.py` to point at `/api/health` for the reason.
+
+### Docs
+
+- README and CLAUDE.md: the API needs the probe files; `ALLOW_LEGACY_MODEL=1` opts into the legacy CNN, next to the `smoke.yaml` end-to-end check (which serves the legacy model). `smoke.yaml` itself is unchanged.
+- The served model directory needs `card_features.json` beside `card_features.onnx` after the real run. Artifacts without it still load, with a WARNING.
 
 ## Out of scope
 
-- Changing what happens after a probe load failure (fail closed vs legacy). That's an owner decision.
+- Retiring the legacy code path ([[cv-ml-improvement-plan]] item 11; a follow-up spec).
 - Any change to features, regions, probes or hyperparameters. Metrics must not move beyond extraction noise.
 - Content hashing of crop files (size + mtime is enough here). Model provenance for the legacy export ([[model-provenance-metadata]]).
 - Precrop or detector changes.
@@ -73,7 +82,8 @@ When probe loading raises, keep today's fallback behaviour; changing it is [[cv-
 
 All new tests use `tmp_path` and synthetic data. None of them reads or writes `data/`.
 
-- [ ] Fast suite: `python -m pytest -m "not slow and not visual and not model"` → 0 failed, 2 xfailed, passed = baseline + the new tests. The baseline is 381 on 2026-10-23, plus whatever earlier specs added.
+- [ ] Fast suite: `python -m pytest -m "not slow and not visual and not model"` → 0 failed, 2 xfailed, passed = baseline + the new tests. The baseline is 398 on 2026-10-27 (after PR #4), plus whatever [[stable-grouped-split]] adds.
+  - The only existing tests allowed to change are those pinning the silent fallback: `test_unloadable_probe_falls_back_to_legacy` (`backend/tests/test_inference.py`), `test_selection_head_only_is_legacy` and `test_selection_features_only_is_legacy` (`backend/tests/test_review_adversarial.py`). Rewrite them to expect "not ready + `probe_load_error`", and add a variant of each with `ALLOW_LEGACY_MODEL=1` expecting `kind == "legacy"`. Tests that need the legacy model pass `model_path` or set the opt-in.
 - [ ] `ml/tests/test_probe_cache.py` (new), with an injected `model_factory` and tiny JPEG crops written to `tmp_path`:
   - [ ] A second call with unchanged files extracts nothing: the factory isn't called, or a call counter stays at 0.
   - [ ] Rewriting one crop file with different pixels re-extracts exactly that cert and returns new features for it.
@@ -82,11 +92,13 @@ All new tests use `tmp_path` and synthetic data. None of them reads or writes `d
 - [ ] `backend/tests/test_grade_head.py` or a new test: `feature_spec_hash()` is stable across calls and changes when any `FEATURE_SPEC` field changes.
 - [ ] Inference tests, using the existing `probe_files` fixture pattern:
   - [ ] Matching hashes load as `kind == "probe"`.
-  - [ ] Mismatched hashes give `kind == "legacy"`, and `metadata["probe_load_error"]` contains "feature_spec_hash".
+  - [ ] Mismatched hashes give `ready == False`, and `metadata["probe_load_error"]` contains "feature_spec_hash". With `ALLOW_LEGACY_MODEL=1` and a legacy model present, `kind == "legacy"` and the error is still in `metadata`.
+  - [ ] Missing probe files give `ready == False` and a `probe_load_error`, even when a legacy model exists. An explicit `model_path` still loads it.
+  - [ ] API: with the service not ready, `/api/grade` returns 503 and `/api/health` shows `model_loaded: false` and the `probe_load_error`.
   - [ ] A head without a hash and features without a sidecar still load as probe, with a WARNING logged (use `caplog`).
 - [ ] `train_probe` order test: with `export_onnx` monkeypatched to raise, `grade_head.npz` is not written (using a `tmp_path` models dir via a monkeypatched `get_settings`).
-- [ ] Real run, after `copy data\models\grade_head.* data\models\backup\` and the same for `cache\region_feats.npz`:
-  - `python -m ml.training.train_probe` re-extracts all certs once, writes `card_features.json`, and the head metadata contains `feature_spec_hash`;
+- [ ] Real run, once, after both this spec and [[stable-grouped-split]] are implemented, and after `copy data\models\grade_head.* data\models\backup\` and the same for `card_features.onnx` and `cache\region_feats.npz`:
+  - `python -m ml.training.train_probe` re-extracts all certs once, writes `card_features.json`, and the head metadata contains `feature_spec_hash`, `test_seen_cards` and `n_test_seen`;
   - CV MAE is 0.4467 ± 0.003, CV QWK 0.6201 ± 0.005, test MAE 0.4897 ± 0.005 (2026-10-23 values);
   - a second run extracts 0 certs.
 - [ ] `python -m pytest -m model backend/tests/test_review_adversarial.py` still passes against the new artifacts, in particular `test_served_features_match_training_cache`.
@@ -98,3 +110,10 @@ All new tests use `tmp_path` and synthetic data. None of them reads or writes `d
 - **Fact:** the cache stores features as float16 and the served path uses float32. The relative difference is below 2e-3 (`test_served_features_match_training_cache`), so it's left as is.
 - **Assumption:** `st_mtime_ns` changes whenever precrop rewrites a crop. It does for `Path.write_bytes` on NTFS. Copying `data/` to another machine can change mtimes, which only causes a safe re-extraction.
 - **Assumption:** GPU re-extraction reproduces the cached features to within float16 rounding, so the metrics stay within the tolerances above.
+
+## Owner decisions (2026-10-27)
+
+- **Fail closed** (open question 3, decided 2026-10-23): replaces this spec's original "keep today's fallback" scope; see "Fail closed" above. Missing probe files count as a failure too, so deleting a file can't silently bring back the legacy CNN. An explicit `model_path` still loads it, and `ALLOW_LEGACY_MODEL=1` opts back in.
+- **Existing fallback tests** are rewritten as listed under the fast-suite criterion; no other existing assertion changes.
+- **Real run:** approved, once, at the end of the round, after backing up the current artifacts to `data/models/backup/`.
+- **Delivery:** one PR together with [[stable-grouped-split]], which lands first (both edit `train_probe.py`'s report and metadata).

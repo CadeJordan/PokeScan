@@ -63,6 +63,7 @@ Measured 2026-10-23 on the real rows (read-only; see [[cv-ml-improvement-plan]] 
 
 - Update the README "Collect training data" paragraph: sticky by default, and how phase 2 works.
 - Add a line to CLAUDE.md that `split` is sticky and `--reassign` is a destructive, owner-approved action.
+- Next to it in CLAUDE.md, the test-set policy (open question 9, decided 2026-10-27): the test split gives one final number per ADR; all model selection (hyperparameters, features, thresholds) uses card-grouped CV on train+val.
 - Phase 2 only: a new ADR recording the new test set and the new baseline numbers.
 
 ## Out of scope
@@ -87,7 +88,10 @@ All tests build their own DB in `tmp_path` via `ml.data.db.connect`. None of the
   - [ ] `--mode stratified` without `--reassign` exits non-zero and writes nothing.
   - [ ] `--dry-run` leaves the DB file's bytes unchanged.
 - [ ] `card_groups` output is identical before and after the refactor: a test over synthetic rows, plus one read-only check over the real DB (`mode=ro`), marked `slow`.
-- [ ] Real DB, phase 1 (read-only): `python -m ml.data.split --dry-run` prints 0 changed rows and a test straddle count of 251 (or the current value). Running it for real changes 0 rows.
+- [ ] Real DB, phase 1:
+  - [ ] `python -m ml.data.split --dry-run` prints 0 changed rows and a test straddle count of 251 (or the current value). Stop here if it reports any changed row.
+  - [ ] Check that no DB-writing job is running (collectors, `precrop`, `precompute_factors`), then back up: `sqlite3 data/pokescan.sqlite ".backup data/backups/pre-sticky-split.sqlite"` (or Python's `sqlite3.Connection.backup` if the CLI is missing). Confirm the backup opens and has the same row count. Check `data/backups/` is gitignored (`data/*` subfolders are listed one by one in `.gitignore`; add it if not).
+  - [ ] Run `python -m ml.data.split` for real: it changes 0 rows.
 - [ ] Phase 2, only after approval and a backup:
   - `python -m ml.data.split --mode grouped --reassign`, then `python -m ml.training.train_probe`;
   - the report shows `n_test_seen == 0`;
@@ -101,3 +105,11 @@ All tests build their own DB in `tmp_path` via `ml.data.db.connect`. None of the
 - **Fact:** `train_probe` fits on train+val together, so after phase 2 only the test assignment matters for the probe. Val still matters for the legacy CNN.
 - **Assumption:** `split='excluded'` breaks no reader. Grep for `split` filters in `ml/` and `backend/`. `ml/data/db.py` helpers that count per split will show a new key.
 - **Assumption:** a hash split without grade stratification keeps enough low grades in test. Simulated 49–61 ≤8 vs 50 today; check with `--dry-run` before phase 2.
+
+## Owner decisions (2026-10-27)
+
+- **Phase 1 only** on real data (open question 1, decided 2026-10-23). Phase 2 is built and tested on `tmp_path` DBs in this round, but not run on the real DB.
+- **Phase 1 real run:** approved, after a 0-changed-rows dry run, a check that no DB-writing job is running, and a manual backup (see the acceptance criterion).
+- **`split='excluded'`:** accepted as written. Grep every split filter to confirm no reader breaks (there are 0 eBay rows today).
+- **Test-set policy** (open question 9): yes; written into CLAUDE.md in this round (see Docs).
+- **Delivery:** one PR together with [[probe-artifact-consistency]], this spec first. Its `train_probe` report fields (`test_seen_cards`, `n_test_seen`) are checked by the single real `train_probe` run at the end of that spec.

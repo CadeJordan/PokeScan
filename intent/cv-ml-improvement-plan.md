@@ -207,3 +207,10 @@ Suggested order: 1–2 and 4 in parallel (they touch different files), then 3, t
 - **Q1:** no re-split this round. Land sticky mode (phase 1) first; phase 2 later, after a DB backup and with an ADR.
 - **Q3:** fail closed. If the probe can't load, return 503 and report why in `/api/health`; `ALLOW_LEGACY_MODEL=1` opts back into the legacy CNN. Implement this with [[probe-artifact-consistency]], replacing its "keep today's fallback" scope line.
 - **Real runs:** agents may run real jobs that rewrite `data/models` (train_probe, GPU extraction), after copying the current artifacts to `data/models/backup/`.
+
+## Owner decisions (2026-10-27)
+
+- **Round 2 scope:** [[stable-grouped-split]] (phase 1 run on real data; phase 2 code built and tested but not run) and [[probe-artifact-consistency]] with fail-closed, in one PR.
+- **Q3 detail:** missing probe files fail closed too; an explicit `model_path` still loads the legacy model; `ALLOW_LEGACY_MODEL=1` is documented next to `smoke.yaml`.
+- **Q9:** yes. The test split gives one final number per ADR; model selection uses card-grouped CV. Written into CLAUDE.md with [[stable-grouped-split]].
+- **Real runs:** the phase-1 split (after a 0-changed-rows dry run and a manual DB backup) and one `train_probe` run at the end (after backing up `data/models`).
