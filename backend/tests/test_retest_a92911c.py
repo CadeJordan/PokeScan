@@ -136,28 +136,68 @@ def test_no_hash_head_with_sidecar_matching_code_loads_with_warning(
     assert _warned(caplog)
 
 
-@pytest.mark.parametrize("empty", ["", None, 0])
-def test_falsy_head_hash_counts_as_no_hash(probe_files, serve_env, caplog, empty):
-    # Observed behaviour (nit): "" / null / 0 in grade_head.json is treated as a
-    # pre-spec head, so it loads with a WARNING rather than failing closed.
+@pytest.mark.parametrize("empty", ["", None, 0, False, [], 428])
+@pytest.mark.parametrize("sidecar", [None, "code"])
+def test_falsy_or_non_string_head_hash_fails_closed(
+    probe_files, serve_env, empty, sidecar
+):
+    # Until smallfix 12 a falsy hash ("" / null / 0) counted as a pre-spec head and
+    # loaded with a WARNING. Only an absent key means pre-spec now (owner decision
+    # 2026-10-27); a present but unusable one fails closed, sidecar or not.
     head_path, feat_path = probe_files
     _save_head(head_path, {"feature_spec_hash": empty})
+    if sidecar:
+        _sidecar(feat_path, {"feature_spec_hash": feature_spec_hash()})
+    svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
+    assert not svc.ready
+    assert svc.probe_load_error.startswith("ValueError: feature_spec_hash: head ")
+    assert "is not a hash" in svc.probe_load_error
+
+
+def test_absent_head_hash_key_still_counts_as_pre_spec(probe_files, serve_env, caplog):
+    head_path, feat_path = probe_files
+    _save_head(head_path, {"trained_at": "x"})
     with caplog.at_level("WARNING", logger="backend.app.ml.inference"):
         svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
     assert svc.ready and svc.kind == "probe"
     assert _warned(caplog)
 
 
-def test_unreadable_sidecar_os_error_fails_closed_even_for_no_hash_head(probe_files, serve_env):
-    # Observed behaviour (nit): an OS-level read error (here: a directory at the
-    # sidecar path) isn't caught by _check_feature_spec, so even a pre-spec head
-    # fails closed (with the OSError in probe_load_error) instead of warning.
+@pytest.mark.parametrize("head_meta", [None, "code"], ids=["no_hash_head", "hash_head"])
+def test_unreadable_sidecar_os_error_fails_closed_for_every_head(
+    probe_files, serve_env, head_meta
+):
+    # An OS-level read error (here: a directory at the sidecar path) propagates out
+    # of _check_feature_spec, so even a pre-spec head fails closed (owner decision
+    # 2026-10-27; the artifact spec's Load check says so).
     head_path, feat_path = probe_files
-    _save_head(head_path)
+    _save_head(head_path, {"feature_spec_hash": feature_spec_hash()} if head_meta else None)
     feat_path.with_suffix(".json").mkdir()
     svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
     assert not svc.ready
     assert svc.probe_load_error.split(":")[0] in ("PermissionError", "IsADirectoryError")
+
+
+def test_sidecar_read_os_error_fails_closed_for_no_hash_head(
+    probe_files, serve_env, monkeypatch
+):
+    from pathlib import Path
+
+    head_path, feat_path = probe_files
+    _save_head(head_path)
+    sidecar = feat_path.with_suffix(".json")
+    _sidecar(feat_path, {"feature_spec_hash": feature_spec_hash()})
+    real_read_text = Path.read_text
+
+    def failing_read_text(self, *a, **k):
+        if self == sidecar:
+            raise OSError("I/O error")
+        return real_read_text(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", failing_read_text)
+    svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
+    assert not svc.ready
+    assert svc.probe_load_error == "OSError: I/O error"
 
 
 # --- no stale error ---------------------------------------------------------- #

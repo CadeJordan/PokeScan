@@ -25,6 +25,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import cv2
@@ -132,30 +133,44 @@ def build_region_model(pretrained: bool = True):
 
 
 def export_onnx(path: Path, pretrained: bool = True) -> None:
-    """Export the region model to `path`, plus a `.json` sidecar with the feature spec."""
+    """Export the region model to `path`, plus a `.json` sidecar with the feature spec.
+
+    Graph and sidecar are written to temp names first, so a failed export leaves
+    the old pair as it was. Then the old sidecar is dropped before the graph is
+    renamed into place, and the new sidecar last: a crash in between leaves no
+    sidecar (serving fails closed, train_probe re-exports), never an old
+    sidecar vouching for a new graph.
+    """
     import torch
 
+    sidecar = path.with_suffix(".json")
+    tmp_graph = path.with_name(path.name + ".tmp")
+    tmp_sidecar = sidecar.with_name(sidecar.name + ".tmp")
     model = build_region_model(pretrained)
     dummy = torch.zeros(2, 3, FEAT_H, FEAT_W)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Drop the old sidecar first, so a failure below never leaves it vouching for
-    # the new graph (serving then fails closed and train_probe re-exports).
-    path.with_suffix(".json").unlink(missing_ok=True)
-    torch.onnx.export(
-        model,
-        dummy,
-        str(path),
-        input_names=["image"],
-        output_names=["regions"],
-        dynamic_axes={"image": {0: "n"}, "regions": {0: "n"}},
-        opset_version=17,
-    )
-    sidecar = {
-        "feature_spec": FEATURE_SPEC,
-        "feature_spec_hash": feature_spec_hash(),
-        "exported_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-    }
-    path.with_suffix(".json").write_text(json.dumps(sidecar, indent=2))
+    try:
+        torch.onnx.export(
+            model,
+            dummy,
+            str(tmp_graph),
+            input_names=["image"],
+            output_names=["regions"],
+            dynamic_axes={"image": {0: "n"}, "regions": {0: "n"}},
+            opset_version=17,
+        )
+        meta = {
+            "feature_spec": FEATURE_SPEC,
+            "feature_spec_hash": feature_spec_hash(),
+            "exported_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        }
+        tmp_sidecar.write_text(json.dumps(meta, indent=2))
+        sidecar.unlink(missing_ok=True)
+        os.replace(tmp_graph, path)
+        os.replace(tmp_sidecar, sidecar)
+    finally:
+        tmp_graph.unlink(missing_ok=True)
+        tmp_sidecar.unlink(missing_ok=True)
 
 
 class FeatureExtractor:

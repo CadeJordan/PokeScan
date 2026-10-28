@@ -330,3 +330,120 @@ def test_exclude_fallback_drops_leaky_cards(tmp_path, monkeypatch):
     assert clean["pipeline"]["excluded_from_metrics"] == 2
     assert clean["pipeline"]["n_fallback"] == 2  # pipeline still describes every card
     assert clean["meta"]["exclude_fallback"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Perturbations: swap_faces and --perturbations
+# --------------------------------------------------------------------------- #
+class _ByteService(_FakeService):
+    """Grade 10 when the front upload is a sample's own front file, else 5."""
+
+    fronts: set[bytes] = set()
+
+    def predict(self, front: bytes, back: bytes):
+        return _FakePrediction(10 if front in self.fronts else 5, True)
+
+
+def _jpeg_samples(tmp_path, n=3):
+    import cv2
+
+    import ml.eval.evaluate as ev
+
+    rng = np.random.default_rng(0)
+    samples = []
+    for i in range(n):
+        paths = []
+        for side in ("front", "back"):
+            path = tmp_path / f"{i}_{side}.jpg"
+            assert cv2.imwrite(str(path), rng.integers(0, 256, (40, 28, 3), dtype=np.uint8))
+            paths.append(path)
+        samples.append(ev.Sample(str(i), 10, *paths, "card"))
+    return samples
+
+
+def test_swap_faces_swaps_the_upload_bytes():
+    from ml.eval.evaluate import ALL_PERTURBATIONS, PERTURBATIONS, apply_perturbation
+
+    assert apply_perturbation("swap_faces", b"front", b"back") == (b"back", b"front")
+    assert "swap_faces" in ALL_PERTURBATIONS and "swap_faces" not in PERTURBATIONS
+    assert set(PERTURBATIONS) < set(ALL_PERTURBATIONS)
+
+
+def test_robustness_runs_swap_faces(tmp_path):
+    import ml.eval.evaluate as ev
+
+    samples = _jpeg_samples(tmp_path)
+    service = _ByteService()
+    service.fronts = {s.front.read_bytes() for s in samples}
+    clean = ev.predict_all(service, samples, progress=False)
+    assert list(clean["cert"]) == ["0", "1", "2"] and (clean["pred_int"] == 10).all()
+    out = ev.robustness(service, samples, clean, ["swap_faces"])
+    assert list(out) == ["swap_faces"]
+    r = out["swap_faces"]
+    assert r["n"] == 3 and r["grade_flip_rate"] == 1.0 and r["mean_abs_soft_shift"] == 5.0
+    assert r["pred_int"] == [5, 5, 5]
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        (None, None),
+        ("", None),
+        ("rotate_180,swap_faces", ["rotate_180", "swap_faces"]),
+        (" swap_faces , blur,swap_faces", ["swap_faces", "blur"]),
+    ],
+)
+def test_parse_perturbations(text, expected):
+    from ml.eval.evaluate import parse_perturbations
+
+    assert parse_perturbations(text) == expected
+
+
+def test_parse_perturbations_rejects_unknown_names():
+    from ml.eval.evaluate import parse_perturbations
+
+    with pytest.raises(ValueError, match=r"unknown perturbation\(s\) rotate_90, nope; known: blur"):
+        parse_perturbations("rotate_180,rotate_90,nope")
+
+
+def test_run_evaluation_default_runs_every_perturbation(tmp_path, monkeypatch):
+    import backend.app.ml.inference as inference
+    import ml.eval.evaluate as ev
+
+    samples = _jpeg_samples(tmp_path, n=2)
+    monkeypatch.setattr(_ByteService, "fronts", {s.front.read_bytes() for s in samples})
+    monkeypatch.setattr(inference, "GradeInferenceService", _ByteService)
+    monkeypatch.setattr(ev, "load_samples", lambda split, limit=None: samples)
+    every = ev.run_evaluation(progress=False, n_boot=0)
+    assert list(every["robustness"]) == list(ev.ALL_PERTURBATIONS)
+    picked = ev.run_evaluation(progress=False, n_boot=0, perturbations=["swap_faces"])
+    assert list(picked["robustness"]) == ["swap_faces"]
+    assert [p["cert"] for p in picked["predictions"]] == ["0", "1"]
+    with pytest.raises(ValueError, match="unknown perturbation"):
+        ev.run_evaluation(progress=False, n_boot=0, perturbations=["sideways"])
+
+
+def test_cli_perturbations_option(monkeypatch):
+    from typer.testing import CliRunner
+
+    import ml.eval.evaluate as ev
+
+    seen = {}
+
+    class StopError(Exception):
+        pass
+
+    def fake_run(**kwargs):
+        seen.update(kwargs)
+        raise StopError
+
+    monkeypatch.setattr(ev, "run_evaluation", fake_run)
+    runner = CliRunner()
+    bad = runner.invoke(ev.app, ["--perturbations", "rotate_180,flip"])
+    assert bad.exit_code == 2 and not seen
+    assert "unknown perturbation(s) flip" in bad.output
+    runner.invoke(ev.app, ["--perturbations", "rotate_180,swap_faces"])
+    assert seen["perturbations"] == ["rotate_180", "swap_faces"]
+    seen.clear()
+    runner.invoke(ev.app, [])
+    assert seen["perturbations"] is None  # all, as before

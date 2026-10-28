@@ -8,6 +8,7 @@ This project is independent and not affiliated with PSA or eBay. Respect each pl
 
 1. **Detect & dewarp** — normalises the upload like the training photos (upright per its EXIF orientation, at most 1024 px on the long edge), finds the card in the photo (including slab shots) and warps it to a 600×840 canvas. If no card outline is found in a landscape photo, it retries once with the photo turned 90°, so a sideways shot is still found (possibly upside down). Portrait photos aren't retried, since the turned search finds false outlines on them, so a sideways card inside a portrait photo isn't found. Failing that, the whole photo is padded onto the canvas and the response notes it.
 2. **Region features** — a frozen DINOv2 ViT-B (self-supervised, not fine-tuned) summarises each face as 11 vectors: CLS, mean, 4 corners, 4 edge strips, centre.
+   - **Face guard** (when `data/models/face_guard.npz` is trained) — small probes on those features check that the front photo is a front, the back a back, and that each is upright. Swapped photos are graded the other way round and an upside-down face is rotated and re-read, each with a note (see [Face guard](#face-guard)).
 3. **Overall grade** — linear proportional-odds (ordinal) probes over the corner, edge, centre and global features of both faces, stacked into one ordinal model.
 4. **Sub-grades**:
    - **Corners / edges / surface** — the soft grade each region probe gives on its own. They are learned from overall PSA grades (no sub-grade labels exist), so read them as "what this region suggests", not PSA's own sub-grade.
@@ -188,8 +189,8 @@ Both sources write to the same SQLite `certs` table with a `source` column (`psa
 python -m ml.data.ebay_collect --grades 6 7 8 9 10 --per-grade 500
 ```
 
-Low grades are scarce (the PSA test split has only ~20 cards graded 8 or
-below), so run a dedicated low-grade pass. `--per-grade` is a target; the
+Low grades are scarce (the PSA test split has 47 certs graded 8 or below, 18 of
+them 7 or below), so run a dedicated low-grade pass. `--per-grade` is a target; the
 collector stops early when eBay runs out of matching listings. Then re-split
 and re-crop so the new certs are usable:
 
@@ -216,8 +217,10 @@ Changing existing assignments needs `--reassign`, a destructive step that
 resets every test number: only with the owner's approval and after a DB
 backup. `--mode stratified --reassign` is the old per-grade shuffle
 (`--ebay-split stratify` works only there). `--mode grouped --reassign` is the
-planned one-time re-split (phase 2 of `intent/stable-grouped-split`): every PSA
-cert is re-placed by its card's hash, so no printed card spans train/val/test.
+one-time re-split (phase 2 of `intent/stable-grouped-split`, run on 2026-10-27,
+`docs/adr/0002-card-grouped-test-split.md`): every PSA cert is re-placed by its
+card's hash, so no printed card spans train/val/test. The current DB is in that
+state; since then the default sticky mode keeps it.
 The first reassign copies the old split into `split_legacy` (NULL for certs
 that had none); later reassigns leave that column alone, so the old numbers stay
 reproducible.
@@ -241,6 +244,8 @@ python -m ml.data.collect_all `
 ```
 
 Resume from where a token stopped (use the logged cert number as the next start for that slot).
+
+Both skip certs already collected with images, without any PSA call (the log says how many). Certs stored without images are fetched again. `--refresh` re-fetches every cert in the range; it spends quota and re-downloads the images. Careful: a failure during a refresh overwrites what was stored, the same as on a first collection. If a cert's images call fails, its image columns (`front_url`/`back_url`, `front_path`/`back_path`, `has_images`) are cleared; if only one image download fails, that face's path and `has_images` are reset. The image files on disk stay, and a later run without `--refresh` fetches the cert again.
 
 ## Train a model
 
@@ -273,6 +278,44 @@ The cache is keyed on each crop file's size and mtime, so certs re-cropped by
 layout, or its `version` when `to_input`/`region_means` change) discards the
 whole cache and re-exports the graph; the API refuses a head and graph whose
 hashes differ.
+
+### Face guard
+
+```powershell
+python -m ml.training.train_face_guard    # after train_probe; one GPU pass over rotated crops
+```
+
+Trains three logistic probes over each face's CLS + mean features: front vs
+back (on both orientations), and upright vs upside down for fronts and for
+backs. It reads the upright features from `train_probe`'s cache (never
+rewriting it), extracts features of every precrop rotated 180° into
+`data/models/cache/region_feats_rot180.npz` (keyed like the main cache), and
+picks each probe's threshold from card-grouped 5-fold CV on train+val: the
+lowest of 0.9 / 0.95 / 0.99 whose false-positive rate on correctly placed,
+upright faces is at most 0.2%. A check that misses its gate (side: CV error
+≤ 0.3% and AUC ≥ 0.999; upright: AUC ≥ 0.99), or for which no threshold in
+{0.9, 0.95, 0.99} meets FPR ≤ 0.2%, is stored but disabled. The shipped guard
+(2026-10-28) has `back_upright` disabled for that reason, so only swapped
+photos and upside-down fronts are corrected; an upside-down back is graded as
+uploaded. A pair whose photos both read as backs (or both as fronts) gets a
+note and no rotation. Writes
+`data/models/face_guard.npz` + `face_guard.json` (enabled checks, thresholds,
+CV and test metrics, `feature_spec_hash`) and
+`test-artifacts/eval/face_guard_report.json`.
+
+The API loads the guard when `face_guard.npz` sits next to the head. Unlike the
+head, it fails open: a guard whose sidecar is missing, unreadable or records
+another `feature_spec_hash` is dropped with a WARNING and
+`face_guard_load_error` in `/api/health` metadata, and grading runs as without
+it. When a `face_guard.npz` exists, `/api/health` metadata `face_guard` says whether it loaded and which checks
+are enabled. Retrain it whenever the feature spec changes. Its response notes:
+
+- `front and back photos looked swapped; graded them the other way round`:
+  the front upload read as a card back and the back upload as a front.
+- `both photos look like card backs` (or `fronts`): graded as uploaded, but
+  the grade is unreliable; upload one photo of each side.
+- `front photo was upside down; rotated it` (or `back`): that face was turned
+  180° and its features re-extracted (about 1.4 s more on CPU).
 
 Restart the API afterwards. The rest of this section is the legacy end-to-end
 CNN, which the API serves only with `ALLOW_LEGACY_MODEL=1` (or through
@@ -361,7 +404,7 @@ Do the same with the single-task v3 checkpoint (`best-03-0.668.ckpt`).
 
 Run each configuration on the same clean crops (Step 1 done, `precrop --force`
 run). Pick the winner by **val** QWK, then confirm it on **test**. It must beat
-always-predict-10 on MAE (0.64 on the current test split).
+always-predict-10 on MAE (0.66 on the current test split).
 
 | Run | Config | `sampler_power` |
 |---|---|---|
@@ -405,7 +448,14 @@ Each run's CSV log (`data/models/logs/<run>/version_*/metrics.csv`) has
 python -m ml.eval.evaluate --split test                 # full report + charts in test-artifacts/eval/
 python -m ml.eval.evaluate --split test --tta           # average over hflip + dim/bright copies
 python -m ml.eval.evaluate --split test --n-boot 2000   # tighter CI estimates (default 1000; 0 = off)
+python -m ml.eval.evaluate --split test --perturbations rotate_180,swap_faces  # only these robustness runs
 ```
+
+The robustness runs (100 cards each by default, `--robustness-limit`) cover
+blur, JPEG, rotation and lighting perturbations of both photos, plus
+`swap_faces` (front and back uploads exchanged). `--perturbations` takes a
+comma list; the default runs all of them. The report lists each cert's
+prediction (`predictions`), so two runs can be compared cert by cert.
 
 The report includes 95% bootstrap CIs for MAE, QWK, exact and bias, plus a
 per-grade table with a Wilson CI on recall and a bootstrap CI on MAE. Low

@@ -5,7 +5,8 @@ Usage:
     python -m ml.data.collect --start-cert 90000000 --count 5000
 
 Quota-aware: stops cleanly when the local daily quota is exhausted so you can
-resume tomorrow without losing progress.
+resume tomorrow without losing progress. Certs already collected with images
+are skipped without any PSA call; pass `--refresh` to re-fetch them.
 """
 
 from __future__ import annotations
@@ -42,6 +43,20 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("collect")
 
 app = typer.Typer(add_completion=False, help="Harvest PSA certs into local SQLite + images.")
+
+
+def _collected_with_images(conn, cert_number: str) -> bool:
+    """True if the cert is already in the DB with both images saved.
+
+    A re-scan skips such certs: re-fetching them spends PSA quota and, if the
+    images call or a download fails, would wipe their image paths.
+    """
+    return (
+        conn.execute(
+            "SELECT 1 FROM certs WHERE cert_number=? AND has_images=1 LIMIT 1", (cert_number,)
+        ).fetchone()
+        is not None
+    )
 
 
 def _details_row(details: PSACertDetails) -> dict:
@@ -122,6 +137,7 @@ async def _run(
     daily_limit: int,
     abort_after_misses: int,
     token_index: int | None,
+    refresh: bool = False,
 ) -> None:
     settings = get_settings()
     try:
@@ -152,6 +168,7 @@ async def _run(
                 consecutive_404s = 0
                 pokemon_seen = 0
                 hits_seen = 0
+                skipped = 0
 
                 async def _drain(limit: int = 0) -> None:
                     nonlocal quota_exhausted, consecutive_404s, pokemon_seen, hits_seen
@@ -197,6 +214,10 @@ async def _run(
                         if quota_exhausted or psa.calls_remaining <= 0:
                             log.warning("local quota exhausted before reaching %d", cert)
                             break
+                        if not refresh and _collected_with_images(conn, str(cert)):
+                            skipped += 1
+                            progress.advance(task)
+                            continue
                         inflight.append(
                             asyncio.create_task(
                                 _process_cert(psa, cert, settings.images_dir, sem)
@@ -207,6 +228,7 @@ async def _run(
                         if (
                             abort_after_misses > 0
                             and hits_seen == 0
+                            and skipped == 0
                             and consecutive_404s >= abort_after_misses
                         ):
                             log.error(
@@ -223,6 +245,11 @@ async def _run(
 
                 if quota_exhausted:
                     log.warning("daily quota exhausted - stopped cleanly")
+                if skipped:
+                    log.info(
+                        "skipped %d certs already collected with images (--refresh re-fetches)",
+                        skipped,
+                    )
 
             n_pokemon = pokemon_cert_count(conn)
             log.info(
@@ -249,9 +276,20 @@ def main(
         help="Which PSA_API_TOKEN<N> from .env to use (e.g. 0, 1, 2). "
         "Omit to use the lowest-indexed token (or legacy PSA_API_TOKEN).",
     ),
+    refresh: bool = typer.Option(
+        False,
+        "--refresh",
+        help="Re-fetch certs already collected with images (spends quota and "
+        "re-downloads their images). By default they are skipped. Warning: if a "
+        "cert's images call fails during a refresh, its image columns are cleared, "
+        "as on a first collection (the files on disk stay).",
+    ),
 ) -> None:
     asyncio.run(
-        _run(start_cert, count, concurrency, daily_limit, abort_after_misses, token_index)
+        _run(
+            start_cert, count, concurrency, daily_limit, abort_after_misses, token_index,
+            refresh=refresh,
+        )
     )
 
 

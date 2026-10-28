@@ -12,11 +12,17 @@ Two model kinds, picked at load time:
 Otherwise the service fails closed: no model is loaded, `/api/grade` returns
 503 and `metadata["probe_load_error"]` (shown by `/api/health`) says why.
 
+With the probe model, the face guard (`face_guard.py`, `face_guard.npz` next to
+the head) swaps swapped uploads back and rotates upside-down faces before the
+head runs, with a note. It fails open: if it can't be loaded or trusted,
+`metadata["face_guard_load_error"]` says why and grading runs without it.
+
 Thread-safe for concurrent requests.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 from dataclasses import dataclass, field
@@ -71,6 +77,16 @@ class GradePrediction:
     # centering and condition sub-grades) reuse them instead of detecting again.
     # Not part of the prediction's value: left out of == and repr (big arrays).
     crops: tuple[CardCrop, CardCrop] | None = field(default=None, compare=False, repr=False)
+    # What the face guard changed about the input, for the response notes.
+    notes: list[str] = field(default_factory=list)
+
+
+def _rotate_crop(crop: CardCrop) -> CardCrop:
+    """The crop turned 180 degrees. The quad is re-ordered to match, so it still
+    lists (tl, tr, br, bl) of the rotated card in the frame of `source_bgr`."""
+    quad = None if crop.quad is None else np.roll(crop.quad, 2, axis=0)
+    image = np.ascontiguousarray(crop.image[::-1, ::-1])
+    return dataclasses.replace(crop, image=image, quad=quad)
 
 
 class GradeInferenceService:
@@ -110,6 +126,8 @@ class GradeInferenceService:
         self.kind = "legacy"
         self.model_path = Path(model_path or settings.active_model_path)
         self.probe_load_error: str | None = None
+        self.face_guard_load_error: str | None = None
+        self._guard = None
         self._session: ort.InferenceSession | None = None
         self._meta: dict = {}
         self._lock = Lock()
@@ -168,13 +186,66 @@ class GradeInferenceService:
             self.features_path,
             self._session.get_providers(),
         )
+        self._load_guard(dim if isinstance(dim, int) else None)
+
+    @property
+    def face_guard_path(self) -> Path:
+        return self.head_path.with_name("face_guard.npz")
+
+    def _load_guard(self, dim: int | None) -> None:
+        """Load the face guard if `face_guard.npz` sits next to the head.
+
+        Fails open: any problem (an error importing the guard or stat-ing its file,
+        an unreadable file, a wrong weight shape or width, a bad bias or threshold,
+        a `feature_spec_hash` in `face_guard.json` that is missing, unreadable or
+        not the code's) leaves no guard, logs a WARNING and records
+        `face_guard_load_error`; grading is then exactly as without a guard. Nothing
+        here may make the probe unready.
+        """
+        path = self.face_guard_path
+        try:
+            from backend.app.ml.face_guard import FaceGuard
+            from backend.app.ml.features import feature_spec_hash
+
+            if not path.exists():
+                return
+            sidecar = path.with_suffix(".json")
+            if not sidecar.exists():
+                raise ValueError(f"{sidecar.name} missing")
+            try:
+                meta = json.loads(sidecar.read_text())
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise ValueError(f"{sidecar.name} unreadable") from exc
+            if not isinstance(meta, dict):
+                raise ValueError(f"{sidecar.name} unreadable")
+            have, code = meta.get("feature_spec_hash"), feature_spec_hash()
+            if not isinstance(have, str) or not have:
+                raise ValueError(f"feature_spec_hash {have!r} in {sidecar.name} is not a hash")
+            if have != code:
+                raise ValueError(f"feature_spec_hash {have} ({sidecar.name}) != code {code}")
+            guard = FaceGuard.load(path)
+            if dim is not None:
+                guard.check_feature_dim(dim)
+        except Exception as exc:  # noqa: BLE001
+            self.face_guard_load_error = f"{type(exc).__name__}: {exc}"
+            log.warning(
+                "face guard %s not loaded (%s); grading without it - retrain with "
+                "`python -m ml.training.train_face_guard`",
+                path,
+                self.face_guard_load_error,
+            )
+            return
+        self._guard = guard
+        log.info("loaded face guard %s (enabled: %s)", path, ", ".join(guard.enabled) or "none")
 
     def _check_feature_spec(self, head_meta: dict) -> None:
         """Raise ValueError unless head, feature graph and this code share one feature spec.
 
-        A head with a `feature_spec_hash` needs the code's hash and a sidecar with the
-        same one. A head without it (artifacts from before the check) loads with a
-        WARNING, unless the sidecar records another spec than the code's.
+        A head with a `feature_spec_hash` key needs a non-empty string there, equal
+        to the code's hash and to the sidecar's. A head without the key (artifacts
+        from before the check) loads with a WARNING, unless the sidecar records
+        another spec than the code's. An OS error reading the sidecar (e.g. a
+        directory at that path) propagates, so it fails closed for every head.
         """
         from backend.app.ml.features import feature_spec_hash
 
@@ -186,10 +257,13 @@ class GradeInferenceService:
                 feat_meta = json.loads(sidecar.read_text())
             except (json.JSONDecodeError, UnicodeDecodeError):
                 log.exception("could not parse feature model metadata at %s", sidecar)
+        has_head_hash = "feature_spec_hash" in head_meta
         head_hash = head_meta.get("feature_spec_hash")
         feat_hash = feat_meta.get("feature_spec_hash") if isinstance(feat_meta, dict) else None
         problems = []
-        if head_hash:
+        if has_head_hash and (not isinstance(head_hash, str) or not head_hash):
+            problems.append(f"head {head_hash!r} ({self.head_path.name}) is not a hash")
+        elif has_head_hash:
             if head_hash != code_hash:
                 problems.append(f"head {head_hash} ({self.head_path.name}) != code {code_hash}")
             if not sidecar.exists():
@@ -205,7 +279,7 @@ class GradeInferenceService:
                 f"feature_spec_hash: {'; '.join(problems)}: "
                 "retrain with `python -m ml.training.train_probe`"
             )
-        if not head_hash:
+        if not has_head_hash:
             # Artifacts from before the check: keep loading them.
             log.warning(
                 "feature_spec_hash missing (head %s, %s %s); can't check that head and "
@@ -249,6 +323,16 @@ class GradeInferenceService:
         meta = dict(self._meta)
         if self.probe_load_error is not None:
             meta["probe_load_error"] = self.probe_load_error
+        # Only when a face_guard.npz exists: without one, metadata is as before.
+        if self.kind == "probe" and (self._guard is not None or self.face_guard_load_error):
+            guard = self._guard
+            meta["face_guard"] = {
+                "loaded": guard is not None,
+                "enabled_checks": list(guard.enabled) if guard is not None else [],
+                "thresholds": dict(guard.thresholds) if guard is not None else {},
+            }
+            if self.face_guard_load_error is not None:
+                meta["face_guard_load_error"] = self.face_guard_load_error
         return meta
 
     def _to_tensor(self, rgb: np.ndarray) -> np.ndarray:
@@ -313,6 +397,29 @@ class GradeInferenceService:
         front, back = (_jpeg_roundtrip(c.image) for c in (front_crop, back_crop))
         with self._lock:
             feats = self._extractor(front, back)
+        notes: list[str] = []
+        decision = None
+        if self._guard is not None:
+            try:
+                decision = self._guard.decide(feats)
+            except Exception:  # noqa: BLE001 - a bad guard never fails the request
+                log.warning(
+                    "face guard %s failed on this request; graded it unguarded",
+                    self.face_guard_path,
+                    exc_info=True,
+                )
+        if decision is not None:
+            notes = list(decision.notes)
+            if decision.swap:
+                front_crop, back_crop = back_crop, front_crop
+                feats = np.ascontiguousarray(feats[::-1])
+            if any(decision.flip):
+                flip_front, flip_back = decision.flip
+                front_crop = _rotate_crop(front_crop) if flip_front else front_crop
+                back_crop = _rotate_crop(back_crop) if flip_back else back_crop
+                front, back = (_jpeg_roundtrip(c.image) for c in (front_crop, back_crop))
+                with self._lock:
+                    feats = self._extractor(front, back)
         out = self._head(feats)
         expected, hard, confidence, _ = decode(out.cum_probs)
         return GradePrediction(
@@ -324,6 +431,7 @@ class GradeInferenceService:
             found_quad_back=back_crop.found_quad,
             region_grades=out.region_grades,
             crops=(front_crop, back_crop),
+            notes=notes,
         )
 
 

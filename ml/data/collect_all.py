@@ -58,6 +58,7 @@ async def _run_all(
     daily_limit_token0: int | None,
     count_token0: int | None,
     abort_after_misses: int,
+    refresh: bool = False,
 ) -> None:
     settings = get_settings()
     available = set(settings.psa_api_tokens)
@@ -90,6 +91,7 @@ async def _run_all(
                 daily_limit=lim,
                 abort_after_misses=abort_after_misses,
                 token_index=idx,
+                refresh=refresh,
             )
         except Exception as exc:  # noqa: BLE001
             print(f"!!! token {idx} failed: {exc!r}")
@@ -135,6 +137,13 @@ def main(
         "0,1,2,3,4,5",
         help="Comma-separated token indices, paired positionally with --starts.",
     ),
+    refresh: bool = typer.Option(
+        False,
+        "--refresh",
+        help="Re-fetch certs already collected with images (default: skip them). "
+        "Warning: if a cert's images call fails during a refresh, its image columns "
+        "are cleared, as on a first collection (the files on disk stay).",
+    ),
 ) -> None:
     start_list = _parse_int_list(starts)
     token_list = _parse_int_list(tokens)
@@ -152,6 +161,7 @@ def main(
             daily_limit_token0,
             count_token0,
             abort_after_misses,
+            refresh=refresh,
         )
     )
 

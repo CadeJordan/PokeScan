@@ -111,11 +111,17 @@ All tests build their own DB in `tmp_path` via `ml.data.db.connect`. None of the
     - 2026-10-27: no `python.exe`/`sqlite3.exe` process running. Backup with `Connection.backup` from a `mode=ro` source: `data/backups/pre-sticky-split.sqlite`, 6,762,496 bytes, `integrity_check` ok, 7,429 rows (1,844 train / 393 val / 393 test / 4,799 NULL), same as the source. `data/backups/` was not ignored; added to `.gitignore`.
   - [x] Run `python -m ml.data.split` for real: it changes 0 rows.
     - 2026-10-27: "changed split: 0 of 2630 rows". Compared cert by cert with the backup: 0 of 7,429 `split` values differ. The only change is the migration's new `split_legacy` column (all NULL).
-- [ ] Phase 2, only after approval and a backup:
+- [x] Phase 2, only after approval and a backup:
   - `python -m ml.data.split --mode grouped --reassign`, then `python -m ml.training.train_probe`;
   - the report shows `n_test_seen == 0`;
   - a new ADR records the new test n, grade histogram and metrics next to the old ones;
   - `python -m ml.eval.evaluate --split test --save-baseline` is re-run.
+  - 2026-10-27 (second attempt, after the sanity check was re-referenced): read-only 3-seed CV first: grouped fit set 0.4694 / 0.4668 / 0.4610, mean **0.4657**, +0.014 over 0.4518, inside ±0.02. Old fit set reproduced 0.4467 / 0.4552 / 0.4534.
+  - Backups: the live DB was first checked equal to the earlier backups (0 split diffs, `split_legacy` all NULL), then backed up with `Connection.backup` from a `mode=ro` source to `data/backups/pre-grouped-split.sqlite` (integrity ok, 7,429 rows, 1,844 / 393 / 393 / 4,799 NULL, per-cert identical). `grade_head.*`, `card_features.*` and `grade_model.*` copied to `data/models/backup/pre-grouped-split/`, SHA-256 identical. No `python.exe`/`sqlite3.exe` was running.
+  - Dry run and real run print the same: test 375 (47 graded ≤8), val 374, train 1,881, test straddle 0, "changed split: 1218 of 2630 rows (mode=grouped)". Cert by cert against the dry-run assignment: 0 mismatches, 0 non-eligible rows touched, 0 of 1,310 cards span splits. This was the first reassign, so `split_legacy` was filled and equals the pre-run split for every row.
+  - `train_probe`: `n_test_seen` **0**, test n 370, `feature_spec_hash` 428e7a366e2e unchanged, ONNX not re-exported. CV MAE 0.4694 (n 2,241), test MAE 0.4405 / QWK 0.485 / exact 66.5%.
+  - `evaluate --split test --save-baseline` (served probe, n 375): MAE 0.435, exact 66.9%, QWK 0.491, ECE 0.053, always-10 MAE 0.656. Written to `ml/eval/baseline.json`, which is tracked.
+  - ADR: `docs/adr/0002-card-grouped-test-split.md`.
 - [x] `ruff check .` exits 0.
 
 ## Facts vs assumptions
@@ -141,3 +147,17 @@ All tests build their own DB in `tmp_path` via `ml.data.db.connect`. None of the
 - **Test-set policy** (open question 9): yes; written into CLAUDE.md in this round (see Docs).
 - **Delivery:** one PR together with [[probe-artifact-consistency]], this spec first. Its `train_probe` report fields (`test_seen_cards`, `n_test_seen`) are checked by the single real `train_probe` run at the end of that spec.
   - 2026-10-27, checked: the real run wrote `n_test_seen` 251 and `test_seen_cards` (n 251, MAE 0.4143) to the report and the head metadata, beside `test_unseen_cards` (n 137, MAE 0.6277). 251 of 388 matches the straddle count above.
+
+## Owner decisions (2026-10-27, round 3)
+
+- **Phase 2 approved** (open question 1): run `--mode grouped --reassign` on the real DB this round, after a fresh DB backup (`data/backups/pre-grouped-split.sqlite`) and a `data/models` backup.
+- **Salt stays `pokescan-split-v1`.** The 47 test certs graded ≤8 (simulated 49–61) are accepted; trying other salts until the test set looks nicer would be choosing the test set by hand.
+- **No tolerance on the new metrics**: the test set and the fit set both change. Sanity check only: card-grouped CV MAE within ±0.02 of 0.4467 (CV is already card-grouped, so it should barely move); stop and report if it doesn't.
+- The new ADR (`docs/adr/0002-card-grouped-test-split.md`) becomes the baseline [[face-side-orientation-guard]] measures against.
+
+## Owner decisions (2026-10-27, round 3, after the first phase-2 attempt)
+
+- **First attempt stopped on the sanity check and was rolled back.** Grouped-split CV MAE was 0.4694 (+0.0227 over 0.4467). The DB and `data/models` were restored from the backups above.
+- **Fact:** the 0.4467 reference was one CV seed. Card-grouped 5-fold CV over seeds 0/1/2 gives 0.4467 / 0.4552 / 0.4534 (mean **0.4518**) on the old fit set, and 0.4694 / 0.4668 / 0.4610 (mean 0.4657) on the grouped fit set. The ~0.014 gap matches the changed card population; the bug signals (straddle 0, row counts, `split_legacy`) were clean.
+- **Sanity check re-referenced** to the 3-seed mean: grouped 3-seed CV MAE mean within **±0.02 of 0.4518**; stop and report if it isn't. ADR 0002 records the 3-seed CV means for both fit sets beside the single-seed numbers.
+- **Commit `ml/eval/baseline.json`** (written by `evaluate --save-baseline`) so later specs compare against a tracked file.

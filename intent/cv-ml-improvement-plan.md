@@ -12,6 +12,8 @@ Small fixes found in the review are in `intent/smallfix.md` §10.
 
 ## How the system performs now
 
+> 2026-10-27: superseded for test numbers. The test split was re-assigned by card (item 9, [[stable-grouped-split]] phase 2), so the test rows below describe the old per-cert split, and the CV rows the old fit set. Current numbers: `docs/adr/0002-card-grouped-test-split.md`.
+
 Probe model (`data/models/grade_head.json`, trained 2026-10-23, commit `77a34ea`, 2,223 fit certs, all PSA):
 
 | | n | MAE | exact | QWK | ECE | AUC ≤8 vs ≥9 | AUC 10 vs 9 |
@@ -120,6 +122,8 @@ Ranked by impact over effort. Effort: S < ½ day, M = 1–2 days, L > 3 days.
 
 ### 9. The test split isn't card-grouped (phase 2 of [[stable-grouped-split]], needs decision)
 
+*Done 2026-10-27: re-split by card, new baseline in `docs/adr/0002-card-grouped-test-split.md`. The problem below describes the old split.*
+
 - **Problem:** 251 of the 388 test certs share a printed card with train+val, so the headline test number mixes seen-card performance (MAE 0.414) with unseen-card performance (MAE 0.628).
 - **Evidence:** I simulated a hash-on-card-group assignment with four salts. It gives 341–446 test certs with 49–61 graded ≤8 (the current split has 50), so stratification is roughly preserved. Only 54–63 of today's 393 test certs would stay in test.
 - **Impact:** medium. The headline number would become honest, and it moves to a new baseline. **Effort:** S code + a retrain of about a minute, plus a re-baseline. **Dependencies:** item 4 phase 1, a DB backup ([[data-backup-before-destructive-runs]]), and owner approval (open question 1).
@@ -214,3 +218,13 @@ Suggested order: 1–2 and 4 in parallel (they touch different files), then 3, t
 - **Q3 detail:** missing probe files fail closed too; an explicit `model_path` still loads the legacy model; `ALLOW_LEGACY_MODEL=1` is documented next to `smoke.yaml`.
 - **Q9:** yes. The test split gives one final number per ADR; model selection uses card-grouped CV. Written into CLAUDE.md with [[stable-grouped-split]].
 - **Real runs:** the phase-1 split (after a 0-changed-rows dry run and a manual DB backup) and one `train_probe` run at the end (after backing up `data/models`).
+
+## Owner decisions (2026-10-27, round 3)
+
+- **Round 3 scope:** [[stable-grouped-split]] phase 2 (re-split + ADR 0002), [[face-side-orientation-guard]], and `smallfix.md` §11 / §12, in one PR.
+- **Q1:** phase 2 approved now. **Q6, Q7:** yes (details in the guard spec).
+- **Q2:** (a), 422 "card not found, retake on a plain background" for the probe model; next round, together with the guard's "both photos look like backs" case.
+- **Q4:** keep the API fields; reword the UI hints ("what this region suggests about the overall grade"); a small frontend PR.
+- **Q5:** a 200-cert full-resolution pilot first, after checking whether image downloads cost PSA API quota.
+- **Q8:** yes; the owner photographs 50–100 own slabs as a `--manifest` CSV.
+- **Q10:** specs stay backend-only; Q2/Q4 frontend changes are their own small PRs.

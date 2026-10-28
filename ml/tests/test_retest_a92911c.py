@@ -103,14 +103,16 @@ def test_failed_reassign_leaves_split_legacy_unwritten(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# export_onnx deletes the sidecar first; train_probe follows
+# export_onnx writes temp files first (smallfix 12); train_probe follows
 # --------------------------------------------------------------------------- #
 torch = pytest.importorskip("torch")
 
 
-def test_export_failing_in_torch_export_removes_sidecar_and_train_probe_reexports(
+def test_export_failing_in_torch_export_keeps_old_pair_and_train_probe_skips_reexport(
     tmp_path, monkeypatch
 ):
+    # Until smallfix 12 the old sidecar was deleted before exporting, so this
+    # left no sidecar. Now the old, consistent pair stays as it was.
     path = tmp_path / "card_features.onnx"
     path.write_bytes(b"old graph")
     path.with_suffix(".json").write_text(json.dumps({"feature_spec_hash": feature_spec_hash()}))
@@ -124,9 +126,8 @@ def test_export_failing_in_torch_export_removes_sidecar_and_train_probe_reexport
     monkeypatch.setattr(torch.onnx, "export", fail)
     with pytest.raises(RuntimeError, match="trace failed"):
         features.export_onnx(path)
-    assert not path.with_suffix(".json").exists()
-    assert path.read_bytes() == b"old graph"  # the graph itself is untouched here
-    assert train_probe._onnx_export_reason(path, force=False) == "card_features.json missing"
+    assert path.read_bytes() == b"old graph"
+    assert train_probe._onnx_export_reason(path, force=False) is None
 
 
 def test_train_probe_with_real_export_failing_writes_no_head(tmp_path, monkeypatch):
@@ -170,4 +171,8 @@ def test_train_probe_with_real_export_failing_writes_no_head(tmp_path, monkeypat
     with pytest.raises(RuntimeError, match="trace failed"):
         train_probe.main(force_onnx=False, cv_folds=0)
     assert (models / "grade_head.npz").read_bytes() == b"old head"
-    assert not (models / "card_features.json").exists()
+    # The failed export leaves the old graph + sidecar as they were (smallfix 12).
+    assert (models / "card_features.onnx").read_bytes() == b"old graph"
+    assert json.loads((models / "card_features.json").read_text()) == {
+        "feature_spec_hash": "0ld0ld0ld0ld"
+    }

@@ -99,7 +99,9 @@ async def grade_card(
     except RuntimeError as exc:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
-    notes: list[str] = []
+    # Face guard notes first (swap / rotation): the notes below describe the
+    # faces as graded, i.e. after the guard.
+    notes: list[str] = list(pred.notes)
     if not pred.found_quad_front:
         notes.append("front: card outline not auto-detected; used center-padded fallback")
     if not pred.found_quad_back:
