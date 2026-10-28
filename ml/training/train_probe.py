@@ -6,12 +6,16 @@
 Steps:
 1. Region features for every cert with a usable precrop (front and back
    outline found), extracted with the same graph that is exported for serving.
-   Cached in data/models/cache/ so refitting the head takes seconds.
+   Cached in data/models/cache/ so refitting the head takes seconds; an entry is
+   reused only while its crop files (size + mtime) and the feature spec
+   (`features.feature_spec_hash`) are unchanged.
 2. Card-grouped 5-fold CV over train+val: certs of the same printed card never
    straddle folds, so a probe can't score by recognising the card.
 3. Final head fitted on train+val, evaluated once on the test split.
-4. Writes data/models/grade_head.npz (+ .json metadata, returned by
-   /api/health) and data/models/card_features.onnx.
+4. Writes data/models/card_features.onnx (+ .json sidecar) when it is missing
+   or was exported from another feature spec, then data/models/grade_head.npz
+   (+ .json metadata, returned by /api/health). The graph comes first so a
+   failed export never leaves a new head beside an old graph.
 
 Run `python -m ml.data.precrop` first. Restart the API afterwards.
 """
@@ -34,9 +38,11 @@ from tqdm import tqdm
 from backend.app.core.config import PROJECT_ROOT, get_settings
 from backend.app.ml.features import (
     BACKBONE,
+    FEATURE_SPEC,
     REGION_NAMES,
     build_region_model,
     export_onnx,
+    feature_spec_hash,
     to_input,
 )
 from backend.app.ml.grade_head import decode
@@ -59,7 +65,8 @@ def load_rows(db_path: Path) -> list[sqlite3.Row]:
         return conn.execute(
             "SELECT cert_number, grade_int, split, brand_title, subject, card_number, "
             "cropped_front_path, cropped_back_path FROM certs "
-            "WHERE is_pokemon=1 AND has_images=1 AND grade_int IS NOT NULL AND split IS NOT NULL "
+            "WHERE is_pokemon=1 AND has_images=1 AND grade_int IS NOT NULL "
+            "AND split IN ('train', 'val', 'test') "
             "AND crop_found_front=1 AND crop_found_back=1 "
             "AND cropped_front_path IS NOT NULL AND cropped_back_path IS NOT NULL "
             "ORDER BY cert_number"
@@ -77,22 +84,56 @@ def _read_rgb(path: Path) -> np.ndarray:
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
-def extract_features(rows: list[sqlite3.Row], data_dir: Path, cache: Path, batch: int = 8) -> np.ndarray:
-    """(N, 2, n_regions, D) float32 features, reusing cached certs whose crop paths match."""
+def _file_sig(path: Path) -> str:
+    st = path.stat()
+    return f"{st.st_size}:{st.st_mtime_ns}"
+
+
+def extract_features(
+    rows: list[sqlite3.Row],
+    data_dir: Path,
+    cache: Path,
+    batch: int = 8,
+    model_factory=build_region_model,
+) -> np.ndarray:
+    """(N, 2, n_regions, D) float32 features, reusing cached certs whose crop files are unchanged.
+
+    Cache keys are (cert, front path, back path, front sig, back sig), sig being
+    the crop file's "size:mtime_ns", so a rewritten crop is re-extracted. The
+    whole cache is discarded when it was built from another feature spec, and
+    only the current rows' entries are saved back.
+    """
     import torch
 
-    cached: dict[tuple[str, str, str], np.ndarray] = {}
+    spec_hash = feature_spec_hash()
+    cached: dict[tuple[str, ...], np.ndarray] = {}
     if cache.exists():
-        z = np.load(cache, allow_pickle=False)
-        if str(z["backbone"]) == BACKBONE:
-            for key, f in zip(map(tuple, z["keys"]), z["feats"], strict=True):
-                cached[key] = f
-    keys = [(r["cert_number"], r["cropped_front_path"], r["cropped_back_path"]) for r in rows]
+        with np.load(cache, allow_pickle=False) as z:
+            have = str(z["feature_spec_hash"]) if "feature_spec_hash" in z.files else None
+            if have == spec_hash:
+                cached = dict(zip(map(tuple, z["keys"]), z["feats"], strict=True))
+            else:
+                log.info(
+                    "feature cache %s has feature_spec_hash %s, not %s: re-extracting every cert",
+                    cache,
+                    have,
+                    spec_hash,
+                )
+    keys = [
+        (
+            r["cert_number"],
+            r["cropped_front_path"],
+            r["cropped_back_path"],
+            _file_sig(data_dir / r["cropped_front_path"]),
+            _file_sig(data_dir / r["cropped_back_path"]),
+        )
+        for r in rows
+    ]
     todo = [i for i, k in enumerate(keys) if k not in cached]
     log.info("features: %d cached, %d to extract", len(keys) - len(todo), len(todo))
     if todo:
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = build_region_model().to(device)
+        model = model_factory().to(device)
         with torch.no_grad():
             for s in tqdm(range(0, len(todo), batch), desc="features"):
                 idx = todo[s : s + batch]
@@ -104,13 +145,14 @@ def extract_features(rows: list[sqlite3.Row], data_dir: Path, cache: Path, batch
                 out = model(torch.from_numpy(np.stack(imgs)).to(device)).float().cpu().numpy()
                 for j, i in enumerate(idx):
                     cached[keys[i]] = out[2 * j : 2 * j + 2].astype(np.float16)
+    if todo or set(cached) != set(keys):
+        # Save the current rows only: entries for dropped certs or old crops go.
         cache.parent.mkdir(parents=True, exist_ok=True)
-        all_keys = list(cached)
         np.savez(
             cache,
-            backbone=np.array(BACKBONE),
-            keys=np.array(all_keys),
-            feats=np.stack([cached[k] for k in all_keys]),
+            feature_spec_hash=np.array(spec_hash),
+            keys=np.array(keys),
+            feats=np.stack([cached[k] for k in keys]),
         )
     return np.stack([cached[k] for k in keys]).astype(np.float32)
 
@@ -146,6 +188,24 @@ def _git_commit() -> str | None:
 
 def _rounded(d: dict) -> dict:
     return {k: (round(v, 4) if isinstance(v, float) else v) for k, v in d.items()}
+
+
+def _onnx_export_reason(onnx_path: Path, force: bool) -> str | None:
+    """Why card_features.onnx must be (re-)exported, or None if it matches the feature spec."""
+    if force:
+        return "--force-onnx"
+    sidecar = onnx_path.with_suffix(".json")
+    if not onnx_path.exists():
+        return "graph missing"
+    if not sidecar.exists():
+        return f"{sidecar.name} missing"
+    try:
+        have = json.loads(sidecar.read_text()).get("feature_spec_hash")
+    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+        return f"{sidecar.name} unreadable"
+    if have != feature_spec_hash():
+        return f"feature_spec_hash {have} != {feature_spec_hash()}"
+    return None
 
 
 @app.command()
@@ -199,20 +259,24 @@ def main(
         "n_fit": int(fit_mask.sum()),
         "trained_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "git_commit": _git_commit(),
+        "feature_spec_hash": feature_spec_hash(),
+        "feature_spec": FEATURE_SPEC,
         **{
             k: v
             for k, v in report.items()
             if k in ("cv_grouped", "test", "test_seen_cards", "n_test_seen")
         },
     }
+    # Graph first: if the export fails, no new head is written beside an old graph.
+    onnx_path = settings.models_dir / "card_features.onnx"
+    reason = _onnx_export_reason(onnx_path, force_onnx)
+    if reason:
+        log.info("exporting feature model -> %s (%s)", onnx_path, reason)
+        export_onnx(onnx_path)
+
     head_path = settings.models_dir / "grade_head.npz"
     head.save(head_path)
     log.info("wrote %s", head_path)
-
-    onnx_path = settings.models_dir / "card_features.onnx"
-    if force_onnx or not onnx_path.exists():
-        log.info("exporting feature model -> %s", onnx_path)
-        export_onnx(onnx_path)
 
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(json.dumps(report, indent=2))

@@ -28,8 +28,9 @@ Why not the end-to-end CNN any more: with ~2.6k labelled certs (87% grade 9–10
 fine-tuning ConvNeXt end to end collapsed towards a constant grade and scored
 below "always predict 10". Frozen features + linear probes can't collapse that
 way, refit in seconds, and the per-region probes give sub-grades that actually
-track the grade. The legacy CNN path (`grade_model.onnx`) still loads when no
-probe model is present. See `docs/adr/0001-frozen-features-linear-probes.md`.
+track the grade. The API serves only the probe model; the legacy CNN
+(`grade_model.onnx`) loads only with `ALLOW_LEGACY_MODEL=1` or an explicit
+`--model-path`. See `docs/adr/0001-frozen-features-linear-probes.md`.
 
 ## Repo layout
 
@@ -123,7 +124,9 @@ NEXT_PUBLIC_API_BASE=http://localhost:8000/api
 
 ## Run the app
 
-You need a trained model (`python -m ml.training.train_probe`) before `/grade` works. If none exists yet, skip to [Train a model](#train-a-model) or the health check will report `model_loaded: false`.
+You need a trained probe model (`python -m ml.training.train_probe`) before `/grade` works: `data/models/grade_head.npz` (+ `grade_head.json`) and `card_features.onnx` (+ `card_features.json`). If none exists yet, skip to [Train a model](#train-a-model) or the health check will report `model_loaded: false`.
+
+The API fails closed: if a probe file is missing or doesn't load (corrupt, or head and feature graph built from different feature specs), `/api/grade` returns 503 and `/api/health` shows `model_loaded: false` with the reason in `metadata.probe_load_error`. It never silently serves the legacy CNN, which scores worse than always predicting 10. Set `ALLOW_LEGACY_MODEL=1` (env or `.env`) to fall back to the legacy model at `ACTIVE_MODEL_PATH` instead, e.g. to serve a `smoke.yaml` end-to-end run; the error stays in the health metadata. Artifacts trained before the feature-spec check (no `card_features.json`, no `feature_spec_hash` in `grade_head.json`) still load, with a WARNING.
 
 ### 1. Start the API
 
@@ -173,7 +176,7 @@ Example response shape:
 }
 ```
 
-If the model is missing, `/grade` returns **503** with a message to run export first.
+If no model is loaded, `/grade` returns **503**; `/api/health` says why (`metadata.probe_load_error`).
 
 ## Collect training data
 
@@ -254,12 +257,25 @@ refits after the first run take a minute), reports card-grouped 5-fold CV on
 train+val (certs of the same printed card never straddle folds), fits the head
 on train+val, evaluates once on test, and writes:
 
-- `data/models/grade_head.npz` + `grade_head.json` (weights, metrics; served as `/api/health` metadata)
-- `data/models/card_features.onnx` (the frozen feature extractor; `--force-onnx` to re-export)
+- `data/models/card_features.onnx` + `card_features.json` (the frozen feature
+  extractor and its feature spec). Exported when missing, when the sidecar is
+  missing or records another `feature_spec_hash`, or with `--force-onnx`.
+  Written before the head, so a failed export never pairs a new head with an
+  old graph.
+- `data/models/grade_head.npz` + `grade_head.json` (weights, metrics,
+  `feature_spec_hash`; served as `/api/health` metadata)
 - `test-artifacts/eval/probe_report.json`
 
+The cache is keyed on each crop file's size and mtime, so certs re-cropped by
+`precrop --force` are re-extracted. Changing the feature definition
+(`FEATURE_SPEC` in `backend/app/ml/features.py`: input size, patch, region
+layout, or its `version` when `to_input`/`region_means` change) discards the
+whole cache and re-exports the graph; the API refuses a head and graph whose
+hashes differ.
+
 Restart the API afterwards. The rest of this section is the legacy end-to-end
-CNN, which the API only uses when the two probe files are absent.
+CNN, which the API serves only with `ALLOW_LEGACY_MODEL=1` (or through
+`ml.eval.evaluate --model-path`).
 
 ### Legacy CNN: MVP (overall grade only)
 
@@ -288,7 +304,9 @@ Run `precrop` again after harvesting new certs (`--force` to rebuild all).
 Training configs default to `use_precrop: true` and skip live `detect_and_crop`.
 
 The export step writes `data/models/grade_model.onnx` (or the path in
-`ACTIVE_MODEL_PATH`). Restart the API to load the new weights.
+`ACTIVE_MODEL_PATH`). Restart the API with `ALLOW_LEGACY_MODEL=1` to serve it
+(only when no probe model loads); this is also how to serve the `smoke.yaml`
+end-to-end check (train -> checkpoint -> export -> serve).
 
 ### Training knobs (all configs)
 
@@ -440,7 +458,7 @@ pytest
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/health` | Service status and whether the ONNX model is loaded |
+| `GET` | `/api/health` | Service status, whether a model is loaded, its metadata (and `probe_load_error` when the probe didn't load) |
 | `POST` | `/api/grade` | Multipart upload: `front` + `back` images (JPEG/PNG/WebP, max 12 MB each) |
 
 ## License / disclaimer

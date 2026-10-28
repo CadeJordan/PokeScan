@@ -138,3 +138,4 @@ All tests build their own DB in `tmp_path` via `ml.data.db.connect`. None of the
 - **`split='excluded'`:** accepted as written. Grep every split filter to confirm no reader breaks (there are 0 eBay rows today).
 - **Test-set policy** (open question 9): yes; written into CLAUDE.md in this round (see Docs).
 - **Delivery:** one PR together with [[probe-artifact-consistency]], this spec first. Its `train_probe` report fields (`test_seen_cards`, `n_test_seen`) are checked by the single real `train_probe` run at the end of that spec.
+  - 2026-10-27, checked: the real run wrote `n_test_seen` 251 and `test_seen_cards` (n 251, MAE 0.4143) to the report and the head metadata, beside `test_unseen_cards` (n 137, MAE 0.6277). 251 of 388 matches the straddle count above.

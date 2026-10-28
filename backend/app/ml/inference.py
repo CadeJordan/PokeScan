@@ -7,7 +7,10 @@ Two model kinds, picked at load time:
   `grade_head.py`; trained by `python -m ml.training.train_probe`.
 - legacy: the end-to-end ConvNeXt CORN model (`grade_model.onnx`) from
   `python -m ml.training.export`. Used when an explicit `model_path` is given,
-  or when no probe artifacts exist.
+  or with ALLOW_LEGACY_MODEL=1 when the probe is missing or fails to load.
+
+Otherwise the service fails closed: no model is loaded, `/api/grade` returns
+503 and `metadata["probe_load_error"]` (shown by `/api/health`) says why.
 
 Thread-safe for concurrent requests.
 """
@@ -82,10 +85,14 @@ class GradeInferenceService:
     ) -> None:
         """``model_path`` selects the legacy CORN ONNX model explicitly. Otherwise
         the probe model (``head_path`` + ``features_path``, defaulting to the
-        settings) is used if both files exist, else the legacy active model.
+        settings) is the only model served.
 
-        If the probe artifacts exist but can't be loaded (corrupt, or head and
-        feature model don't match), that is logged and the legacy model is used.
+        If a probe file is missing or loading fails (corrupt file, head and
+        feature model don't match), the error is kept in ``metadata`` as
+        ``probe_load_error`` and the service is not ready, unless
+        ``settings.allow_legacy_model`` is set: then the legacy active model is
+        loaded instead. ``kind`` stays "legacy" until a probe loads; it only
+        matters when ``ready``.
 
         ``tta`` (legacy model only): False (default, single pass), True
         (DEFAULT_TTA) or variant names. With TTA the ONNX model runs once on a
@@ -100,22 +107,38 @@ class GradeInferenceService:
         self.tta: tuple[str, ...] = tuple(tta or ())
         self.head_path = Path(head_path or settings.grade_head_path)
         self.features_path = Path(features_path or settings.feature_model_path)
-        probe = model_path is None and self.head_path.exists() and self.features_path.exists()
         self.kind = "legacy"
         self.model_path = Path(model_path or settings.active_model_path)
+        self.probe_load_error: str | None = None
         self._session: ort.InferenceSession | None = None
         self._meta: dict = {}
         self._lock = Lock()
-        if probe:
+        if model_path is None:
             try:
                 self._load_probe()
-            except Exception:  # noqa: BLE001
-                log.exception(
-                    "could not load probe grade model %s + %s; falling back to legacy",
+            except Exception as exc:  # noqa: BLE001
+                self.probe_load_error = f"{type(exc).__name__}: {exc}"
+                self._session, self._meta = None, {}
+                trace = not isinstance(exc, FileNotFoundError)
+                if not settings.allow_legacy_model:
+                    log.error(
+                        "probe grade model %s + %s not loaded (%s); /grade will return 503. "
+                        "Set ALLOW_LEGACY_MODEL=1 to serve the legacy model instead",
+                        self.head_path,
+                        self.features_path,
+                        self.probe_load_error,
+                        exc_info=trace,
+                    )
+                    return
+                log.warning(
+                    "probe grade model %s + %s not loaded (%s); ALLOW_LEGACY_MODEL is set, "
+                    "falling back to legacy %s",
                     self.head_path,
                     self.features_path,
+                    self.probe_load_error,
+                    self.model_path,
+                    exc_info=trace,
                 )
-                self._session, self._meta = None, {}
             else:
                 self.kind, self.model_path = "probe", self.head_path
                 if self.tta:
@@ -127,8 +150,12 @@ class GradeInferenceService:
         from backend.app.ml.features import FeatureExtractor
         from backend.app.ml.grade_head import GradeHead
 
-        extractor = FeatureExtractor(self.features_path)
+        missing = [p.name for p in (self.head_path, self.features_path) if not p.exists()]
+        if missing:
+            raise FileNotFoundError(", ".join(missing))
         head = GradeHead.load(self.head_path)
+        self._check_feature_spec(head.metadata)
+        extractor = FeatureExtractor(self.features_path)
         dim = extractor.session.get_outputs()[0].shape[-1]
         if isinstance(dim, int):
             head.check_feature_dim(dim)
@@ -141,6 +168,32 @@ class GradeInferenceService:
             self.features_path,
             self._session.get_providers(),
         )
+
+    def _check_feature_spec(self, head_meta: dict) -> None:
+        """Raise ValueError if head and feature graph record different feature specs."""
+        sidecar = self.features_path.with_suffix(".json")
+        feat_meta: dict = {}
+        if sidecar.exists():
+            try:
+                feat_meta = json.loads(sidecar.read_text())
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                log.exception("could not parse feature model metadata at %s", sidecar)
+        head_hash = head_meta.get("feature_spec_hash")
+        feat_hash = feat_meta.get("feature_spec_hash")
+        if head_hash and feat_hash and head_hash != feat_hash:
+            raise ValueError(
+                f"feature_spec_hash {head_hash} ({self.head_path.name}) != "
+                f"{feat_hash} ({sidecar.name}): retrain with `python -m ml.training.train_probe`"
+            )
+        if not (head_hash and feat_hash):
+            # Artifacts from before the check: keep loading them.
+            log.warning(
+                "feature_spec_hash missing (head %s, %s %s); can't check that head and "
+                "feature model match - retrain to record it",
+                head_hash,
+                sidecar.name,
+                feat_hash,
+            )
 
     def _load(self) -> None:
         if not self.model_path.exists():
@@ -173,7 +226,10 @@ class GradeInferenceService:
 
     @property
     def metadata(self) -> dict:
-        return dict(self._meta)
+        meta = dict(self._meta)
+        if self.probe_load_error is not None:
+            meta["probe_load_error"] = self.probe_load_error
+        return meta
 
     def _to_tensor(self, rgb: np.ndarray) -> np.ndarray:
         x = rgb.astype(np.float32) / 255.0

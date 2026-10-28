@@ -41,9 +41,13 @@ class Settings(BaseSettings):
     db_path: Path = PROJECT_ROOT / "data" / "pokescan.sqlite"
     models_dir: Path = PROJECT_ROOT / "data" / "models"
     active_model_path: Path = PROJECT_ROOT / "data" / "models" / "grade_model.onnx"
-    # Probe grade model, preferred when both files exist (see ml/inference.py).
+    # Probe grade model, the only model served unless `allow_legacy_model`
+    # (see ml/inference.py).
     grade_head_path: Path = PROJECT_ROOT / "data" / "models" / "grade_head.npz"
     feature_model_path: Path = PROJECT_ROOT / "data" / "models" / "card_features.onnx"
+    # ALLOW_LEGACY_MODEL=1: serve the legacy CNN (active_model_path) when the
+    # probe is missing or fails to load, instead of returning 503.
+    allow_legacy_model: bool = False
 
     api_host: str = "0.0.0.0"
     api_port: int = 8000

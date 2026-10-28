@@ -182,7 +182,7 @@ class FakeExtractor:
 
 def _probe_service(tmp_path, feats, head):
     svc = GradeInferenceService(head_path=tmp_path / "h.npz", features_path=tmp_path / "f.onnx")
-    assert svc.kind == "legacy"  # probe artifacts missing -> legacy fallback
+    assert svc.kind == "legacy"  # probe artifacts missing -> nothing loaded yet
     svc.kind = "probe"
     svc._extractor = FakeExtractor(feats)
     svc._session = object()
@@ -279,10 +279,18 @@ def probe_files(tmp_path, monkeypatch):
     return tmp_path / "h.npz", feat_path
 
 
-def _save_head(path, dim):
+def _save_head(path, dim, metadata=None):
     from backend.app.ml.features import REGION_NAMES
 
-    _zero_head(np.zeros((2, len(REGION_NAMES), dim))).save(path)
+    head = _zero_head(np.zeros((2, len(REGION_NAMES), dim)))
+    head.metadata = dict(metadata or {})
+    head.save(path)
+
+
+def _write_feature_sidecar(feat_path, spec_hash):
+    import json
+
+    feat_path.with_suffix(".json").write_text(json.dumps({"feature_spec_hash": spec_hash}))
 
 
 def test_probe_files_load_as_probe(probe_files):
@@ -291,16 +299,120 @@ def test_probe_files_load_as_probe(probe_files):
     assert GradeInferenceService(head_path=head_path, features_path=feat_path).kind == "probe"
 
 
-@pytest.mark.parametrize("problem", ["corrupt_head", "dim_mismatch"])
-def test_unloadable_probe_falls_back_to_legacy(probe_files, problem):
-    head_path, feat_path = probe_files
+def _break_probe(head_path, feat_path, problem):
     if problem == "corrupt_head":
         head_path.write_bytes(b"not an npz")
-    else:
+    elif problem == "dim_mismatch":
         _save_head(head_path, 5)
+    else:  # feature_spec_hash mismatch
+        _save_head(head_path, 4, {"feature_spec_hash": "aaaaaaaaaaaa"})
+        _write_feature_sidecar(feat_path, "bbbbbbbbbbbb")
+
+
+PROBLEMS = ["corrupt_head", "dim_mismatch", "spec_mismatch"]
+
+
+@pytest.mark.parametrize("problem", PROBLEMS)
+def test_unloadable_probe_fails_closed(probe_files, serve_env, tiny_legacy_onnx, problem):
+    head_path, feat_path = probe_files
+    serve_env(ACTIVE_MODEL_PATH=tiny_legacy_onnx)  # a legacy model exists, but isn't used
+    _break_probe(head_path, feat_path, problem)
     svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
-    assert svc.kind == "legacy"
-    assert svc.model_path != head_path
+    assert not svc.ready
+    assert svc.probe_load_error
+    assert svc.metadata == {"probe_load_error": svc.probe_load_error}
+
+
+@pytest.mark.parametrize("problem", PROBLEMS)
+def test_unloadable_probe_with_legacy_opt_in_loads_legacy(
+    probe_files, serve_env, tiny_legacy_onnx, problem
+):
+    head_path, feat_path = probe_files
+    serve_env(ACTIVE_MODEL_PATH=tiny_legacy_onnx, ALLOW_LEGACY_MODEL=1)
+    _break_probe(head_path, feat_path, problem)
+    svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
+    assert svc.kind == "legacy" and svc.ready
+    assert svc.model_path == tiny_legacy_onnx
+    assert svc.metadata["probe_load_error"] == svc.probe_load_error
+
+
+def test_feature_spec_hash_mismatch_names_both_hashes(probe_files, serve_env):
+    head_path, feat_path = probe_files
+    _break_probe(head_path, feat_path, "spec_mismatch")
+    svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
+    err = svc.metadata["probe_load_error"]
+    assert err.startswith("ValueError: feature_spec_hash")
+    assert "aaaaaaaaaaaa" in err and "bbbbbbbbbbbb" in err
+
+
+def test_matching_feature_spec_hashes_load_as_probe(probe_files, serve_env, caplog):
+    from backend.app.ml.features import feature_spec_hash
+
+    head_path, feat_path = probe_files
+    _save_head(head_path, 4, {"feature_spec_hash": feature_spec_hash()})
+    _write_feature_sidecar(feat_path, feature_spec_hash())
+    with caplog.at_level("WARNING", logger="backend.app.ml.inference"):
+        svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
+    assert svc.kind == "probe" and svc.ready
+    assert "probe_load_error" not in svc.metadata
+    assert not [r for r in caplog.records if "feature_spec_hash" in r.getMessage()]
+
+
+@pytest.mark.parametrize("head_hash, sidecar", [(None, False), ("abc", False), (None, True)])
+def test_missing_feature_spec_hash_still_loads_with_warning(
+    probe_files, serve_env, caplog, head_hash, sidecar
+):
+    # Artifacts from before the check: a head without a hash and/or no sidecar.
+    head_path, feat_path = probe_files
+    _save_head(head_path, 4, {"feature_spec_hash": head_hash} if head_hash else {})
+    if sidecar:
+        _write_feature_sidecar(feat_path, "abc")
+    with caplog.at_level("WARNING", logger="backend.app.ml.inference"):
+        svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
+    assert svc.kind == "probe" and svc.ready
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("feature_spec_hash missing" in r.getMessage() for r in warnings)
+
+
+@pytest.mark.parametrize("missing", ["head", "features", "both"])
+def test_missing_probe_files_fail_closed(tmp_path, serve_env, tiny_legacy_onnx, missing):
+    head_path, feat_path = tmp_path / "grade_head.npz", tmp_path / "card_features.onnx"
+    if missing == "features":
+        _save_head(head_path, 4)
+    if missing == "head":
+        feat_path.write_bytes(b"stub")
+    serve_env(ACTIVE_MODEL_PATH=tiny_legacy_onnx)
+    svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
+    assert not svc.ready
+    names = {"head": ["grade_head.npz"], "features": ["card_features.onnx"]}
+    want = names.get(missing) or names["head"] + names["features"]
+    assert svc.metadata["probe_load_error"] == "FileNotFoundError: " + ", ".join(want)
+
+
+def test_missing_probe_files_with_legacy_opt_in_load_legacy(tmp_path, serve_env, tiny_legacy_onnx, jpeg):
+    serve_env(ACTIVE_MODEL_PATH=tiny_legacy_onnx, ALLOW_LEGACY_MODEL=1)
+    svc = GradeInferenceService(head_path=tmp_path / "h.npz", features_path=tmp_path / "f.onnx")
+    assert svc.kind == "legacy" and svc.ready
+    assert svc.metadata["probe_load_error"] == "FileNotFoundError: h.npz, f.onnx"
+    assert 1 <= svc.predict(jpeg, jpeg).grade_int <= 10
+
+
+def test_explicit_model_path_loads_legacy_without_probe(tmp_path, serve_env, tiny_legacy_onnx):
+    # Deliberate choice (evaluate --model-path, tests): not gated by the opt-in.
+    svc = GradeInferenceService(
+        model_path=tiny_legacy_onnx, head_path=tmp_path / "h.npz", features_path=tmp_path / "f.onnx"
+    )
+    assert svc.kind == "legacy" and svc.ready
+    assert svc.probe_load_error is None and "probe_load_error" not in svc.metadata
+
+
+def test_allow_legacy_model_setting_reads_env(monkeypatch):
+    from backend.app.core.config import Settings
+
+    monkeypatch.delenv("ALLOW_LEGACY_MODEL", raising=False)
+    assert Settings(_env_file=None).allow_legacy_model is False
+    monkeypatch.setenv("ALLOW_LEGACY_MODEL", "1")
+    assert Settings(_env_file=None).allow_legacy_model is True
 
 
 def test_tta_rejected_for_probe_model(probe_files):

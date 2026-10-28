@@ -556,6 +556,9 @@ def run_evaluation(
 
     service = GradeInferenceService(model_path=model_path, tta=tta)
     if not service.ready:
+        reason = service.metadata.get("probe_load_error")
+        if reason:
+            raise RuntimeError(f"probe model not loaded: {reason}")
         raise RuntimeError(f"model not loaded from {service.model_path}")
     if manifest is not None:
         samples = load_manifest(manifest, limit)
