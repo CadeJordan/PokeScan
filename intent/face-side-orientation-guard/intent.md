@@ -103,3 +103,14 @@ Measured 2026-10-23 with the served probe model (see [[cv-ml-improvement-plan]] 
 - **Assumption:** the crop of a 180°-rotated photo is close enough to the 180° rotation of the upright crop that features from rotated precrops are representative. Precrops are byte-identical to the detector output, but the rotated detection can snap differently by a pixel or two.
 - **Dependency:** [[serve-input-normalization]] (`GradePrediction.crops`). [[probe-artifact-consistency]] is optional; if it has landed, reuse its cache keying and fingerprint.
 - **Compute:** one GPU feature extraction of about 5.2k rotated faces, plus about 1.4 s extra CPU latency only for requests where a face is flipped ([[cv-ml-improvement-plan]] open question 6).
+
+## Owner decisions (2026-10-27)
+
+- **Compute (Q6):** approved: one GPU extraction of the ~5.2k 180°-rotated crops into `data/models/cache/region_feats_rot180.npz`, and a new `data/models/face_guard.npz` + `.json`, after backing up `data/models`.
+- **Notes (Q7):** approved as written in Scope; the schema doesn't change.
+- **Artifact mismatch:** `face_guard.json` records `feature_spec_hash`. If it is missing, unreadable or differs from the code's `feature_spec_hash()`, the guard is **disabled, not the API**: log a WARNING, report `face_guard_load_error` in `/api/health` metadata, and grade as if no guard existed. A stale guard making wrong swaps is the risk; an absent guard changes nothing.
+- **Gates:** a check that misses its gate (likely the back upright probe, as card backs are nearly point-symmetric) is disabled and recorded; ship the checks that pass.
+- **Latency:** the extra extraction (~1.4 s CPU) on requests with a flipped face is accepted.
+- **"Both photos look like backs/fronts":** note only, no rejection. Rejection is decided with [[cv-ml-improvement-plan]] open question 2 in a later round.
+- **Baseline:** measured on the card-grouped test split from [[stable-grouped-split]] phase 2 (ADR 0002), after it lands; start only then.
+- **Delivery:** one PR with phase 2 and `smallfix.md` §11 / §12.

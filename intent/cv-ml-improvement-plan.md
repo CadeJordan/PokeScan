@@ -214,3 +214,13 @@ Suggested order: 1–2 and 4 in parallel (they touch different files), then 3, t
 - **Q3 detail:** missing probe files fail closed too; an explicit `model_path` still loads the legacy model; `ALLOW_LEGACY_MODEL=1` is documented next to `smoke.yaml`.
 - **Q9:** yes. The test split gives one final number per ADR; model selection uses card-grouped CV. Written into CLAUDE.md with [[stable-grouped-split]].
 - **Real runs:** the phase-1 split (after a 0-changed-rows dry run and a manual DB backup) and one `train_probe` run at the end (after backing up `data/models`).
+
+## Owner decisions (2026-10-27, round 3)
+
+- **Round 3 scope:** [[stable-grouped-split]] phase 2 (re-split + ADR 0002), [[face-side-orientation-guard]], and `smallfix.md` §11 / §12, in one PR.
+- **Q1:** phase 2 approved now. **Q6, Q7:** yes (details in the guard spec).
+- **Q2:** (a), 422 "card not found, retake on a plain background" for the probe model; next round, together with the guard's "both photos look like backs" case.
+- **Q4:** keep the API fields; reword the UI hints ("what this region suggests about the overall grade"); a small frontend PR.
+- **Q5:** a 200-cert full-resolution pilot first, after checking whether image downloads cost PSA API quota.
+- **Q8:** yes; the owner photographs 50–100 own slabs as a `--manifest` CSV.
+- **Q10:** specs stay backend-only; Q2/Q4 frontend changes are their own small PRs.

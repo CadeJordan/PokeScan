@@ -97,6 +97,8 @@ From the [[stable-grouped-split]] implementation.
   - Done 2026-10-27. The base row is now built by a pure `collect._details_row(details)`, without `split`. A new cert gets the schema default (NULL), and `upsert_cert` only updates the keys in the row, so a re-scan keeps the split. Tests: `ml/tests/test_collect_rescan.py::test_rescan_keeps_assigned_split` (fresh cert NULL; `test`, crop and sub-grade columns survive a re-upsert) and `::test_details_row_omits_pipeline_owned_columns`. `ebay_collect` checks `cert_exists` before every upsert, so it still sends `"split": None` but only for new rows; left as is.
   - Still open (not fixed): a PSA re-scan always rewrites `front_url`/`back_url`/`front_path`/`back_path`/`has_images`. If the images call returns nothing or a CDN download fails, an already-collected cert loses its image paths and drops to `has_images=0` (the files stay on disk). Its `cropped_*`/`crop_*`/`*_subgrade` survive but point at a cert the dataset no longer reads. When the downloads succeed, the images are re-downloaded and overwritten, so the crops and sub-grades can be stale relative to the new files. `collect` doesn't skip existing certs at all, so a re-scan also spends PSA quota on certs it already has. Fix: skip certs that are already collected with images, or on a failed fetch leave the image columns out of the row.
 
+Owner decision (2026-10-27): **skip PSA certs already collected with images**, with a `--refresh` flag for a deliberate re-fetch. In this round's PR.
+
 ## 12. Probe-artifact follow-ups (2026-10-27 re-test)
 
 From the re-test of [[probe-artifact-consistency]]; none is a bug, all fail in the safe direction or need hand-edited metadata.
@@ -104,3 +106,5 @@ From the re-test of [[probe-artifact-consistency]]; none is a bug, all fail in t
 - [ ] `backend/app/ml/features.py` `export_onnx` deletes the old `card_features.json` before exporting. If `torch.onnx.export` then fails before writing anything (e.g. CUDA OOM on `--force-onnx`), the old graph, head and hash are still consistent, but the next API start fails closed on the missing sidecar. Write graph and sidecar to temp names and rename instead.
 - [ ] `backend/app/ml/inference.py` `_check_feature_spec` treats a falsy head hash (`""`, `null`) as a pre-spec head (WARNING and load) rather than failing closed. Only reachable with hand-edited or corrupt `grade_head.json`.
 - [ ] `_check_feature_spec` catches only JSON/Unicode errors when reading the sidecar; an OS-level read error fails closed even for a no-hash head, where the spec says such heads load "whatever the sidecar says". Safe direction; decide which the spec should say.
+
+Owner decision (2026-10-27), in this round's PR: write the graph and sidecar to temp names and rename (an export that fails before writing anything must leave the old, consistent pair loadable); a falsy head hash is an error (fail closed); an OS-level sidecar read error fails closed, and the spec says so.
