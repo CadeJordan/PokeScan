@@ -14,7 +14,10 @@ Otherwise the service fails closed: no model is loaded, `/api/grade` returns
 
 With the probe model, the face guard (`face_guard.py`, `face_guard.npz` next to
 the head) swaps swapped uploads back and rotates upside-down faces before the
-head runs, with a note. It fails open: if it can't be loaded or trusted,
+head runs, with a note. When it reads both faces as the same side it changes
+nothing and sets `GradePrediction.same_side`; `predict` still grades the pair,
+and `/api/grade` refuses it with 422 (via `GradePrediction.rejection()`). It
+fails open: if it can't be loaded or trusted,
 `metadata["face_guard_load_error"]` says why and grading runs without it.
 
 Thread-safe for concurrent requests.
@@ -34,7 +37,14 @@ import numpy as np
 import onnxruntime as ort
 
 from backend.app.core.config import get_settings
-from backend.app.ml.preprocess import CARD_H, CARD_W, CardCrop, detect_and_crop, encode_jpeg
+from backend.app.ml.preprocess import (
+    CARD_H,
+    CARD_W,
+    CardCrop,
+    ImageDecodeError,
+    detect_and_crop,
+    encode_jpeg,
+)
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +89,45 @@ class GradePrediction:
     crops: tuple[CardCrop, CardCrop] | None = field(default=None, compare=False, repr=False)
     # What the face guard changed about the input, for the response notes.
     notes: list[str] = field(default_factory=list)
+    # The guard swapped the faces: `found_quad_*` and `crops` are in graded order,
+    # so the uploaded front is the graded back.
+    swapped: bool = False
+    # "front" / "back" when the guard read both faces as that side (graded as is).
+    same_side: str | None = None
+
+    def rejection(self) -> tuple[str, str] | None:
+        """`(kind, message)` when `/api/grade` refuses this prediction (422), else None.
+
+        Probe model only: a face with no card outline (the padded whole photo,
+        which the probe never trained on) is `"card_not_found"`, and a pair the
+        face guard read as two of one side is `"same_side"`. The prediction is
+        still made, so `ml.eval` grades these inputs and counts them. The legacy
+        model grades them as before, with a note.
+        """
+        if self.region_grades is None:
+            return None
+        # Name faces as uploaded: after a guard swap the graded front is the uploaded back.
+        found = (self.found_quad_front, self.found_quad_back)
+        if self.swapped:
+            found = found[::-1]
+        missing = [face for face, ok in zip(("front", "back"), found, strict=True) if not ok]
+        if missing:
+            faces = " and ".join(missing)
+            return "card_not_found", f"{faces}: card not found; retake the photo on a plain background"
+        if self.same_side is not None:
+            return "same_side", (
+                f"both photos look like card {self.same_side}s; "
+                "upload one photo of the front and one of the back"
+            )
+        return None
+
+
+def _detect_face(image: bytes, label: str) -> CardCrop:
+    """`detect_and_crop`, with an undecodable upload's error naming its face."""
+    try:
+        return detect_and_crop(image)
+    except ImageDecodeError as exc:
+        raise ImageDecodeError(f"{label}: {exc}", face=label) from exc
 
 
 def _rotate_crop(crop: CardCrop) -> CardCrop:
@@ -345,8 +394,8 @@ class GradeInferenceService:
         if self._session is None:
             raise RuntimeError("grade model not loaded")
 
-        front_crop = detect_and_crop(front_bytes)
-        back_crop = detect_and_crop(back_bytes)
+        front_crop = _detect_face(front_bytes, "front")
+        back_crop = _detect_face(back_bytes, "back")
         if front_crop.image.shape[:2] != (CARD_H, CARD_W):
             raise RuntimeError("preprocessing produced wrong shape")
         if self.kind == "probe":
@@ -432,6 +481,8 @@ class GradeInferenceService:
             region_grades=out.region_grades,
             crops=(front_crop, back_crop),
             notes=notes,
+            swapped=decision is not None and decision.swap,
+            same_side=None if decision is None else decision.same_side,
         )
 
 

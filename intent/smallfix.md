@@ -83,7 +83,8 @@ Follow-ups from the [[serve-input-normalization]] review (2026-10-23; not done):
   - Done: the spec's criterion is restated to that bar, which the recorded run meets (161 ms vs `orig` + 75 = 182 ms and HEAD's 435 ms).
 - [ ] `run_in_threadpool` in `backend/app/api/grade.py` gives unbounded concurrency (anyio's default 40 threads, ~36 MB per 12 MP decode); consider a `CapacityLimiter`.
 - [ ] Sideways crops that land upside down report swapped centering sides (left/right, top/bottom); needs the [[face-side-orientation-guard]].
-- [ ] Corrupt or truncated uploads return a plain 500, unchanged from HEAD; they should be 400/422.
+- [x] Corrupt or truncated uploads return a plain 500, unchanged from HEAD; they should be 400/422.
+  - Done in [[reject-unusable-uploads]]: 400 `"<face>: not a readable image (corrupt or truncated file)"`.
 - [ ] Serving drops alpha with `convert("RGB")` (`preprocess.decode_image`), whereas ingest composites onto white.
 - [ ] Square photos (`w == h`) are never retried: `preprocess.py:575` uses a strict `>`. Either list square photos under the spec's accepted cost, or use `>=` (no stored photo is square) and add a test pinning it.
 - [ ] The slow byte-identical test (`backend/tests/test_preprocess.py:393-400`) doesn't assert how many fallback faces it covers. Add `assert len(fallbacks) == 21` (or at least non-empty) so missing files can't make it check fewer, down to zero.

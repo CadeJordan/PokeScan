@@ -7,6 +7,7 @@ Specs written from this plan:
 - [[probe-artifact-consistency]]: item 3
 - [[stable-grouped-split]]: items 4 and 9
 - [[face-side-orientation-guard]]: item 6
+- [[reject-unusable-uploads]]: item 7 (open question 2) and the guard's same-side case
 
 Small fixes found in the review are in `intent/smallfix.md` §10.
 

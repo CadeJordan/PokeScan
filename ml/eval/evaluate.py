@@ -378,7 +378,7 @@ def predict_all(
     from tqdm import tqdm
 
     keys = ("cert", "grade", "pred_int", "pred_soft", "confidence", "quad_front", "quad_back",
-            "latency", "crop_kind", "notes")
+            "latency", "crop_kind", "notes", "reject")
     rows = {k: [] for k in keys}
     it = tqdm(samples, desc=perturb or "eval", disable=not progress)
     for s in it:
@@ -390,6 +390,9 @@ def predict_all(
         rows["latency"].append(time.perf_counter() - t0)
         rows["cert"].append(s.cert)
         rows["notes"].append("; ".join(getattr(p, "notes", None) or []))
+        # Would /api/grade refuse it? The kind, or "" when it would grade it.
+        rejection = p.rejection() if hasattr(p, "rejection") else None
+        rows["reject"].append(rejection[0] if rejection else "")
         rows["grade"].append(s.grade)
         rows["pred_int"].append(p.grade_int)
         rows["pred_soft"].append(p.grade)
@@ -414,6 +417,11 @@ def crop_kind_breakdown(rows: dict) -> dict:
         str(k): {"n": int((kinds == k).sum()), "mae": float(err[kinds == k].mean())}
         for k in sorted(set(kinds.tolist()), key=_KIND_ORDER.index)
     }
+
+
+def would_reject_counts(reject: np.ndarray) -> dict[str, int]:
+    """How many inputs `/api/grade` would refuse (422), per rejection kind."""
+    return {kind: int((reject == kind).sum()) for kind in ("card_not_found", "same_side")}
 
 
 def build_report(
@@ -445,6 +453,7 @@ def build_report(
             "mae_fallback": float(np.abs(pi - true)[~both_found].mean()) if (~both_found).any() else None,
             "n_fallback": int((~both_found).sum()),
             "crop_kinds": crop_kind_breakdown(rows),
+            **({"n_would_reject": would_reject_counts(rows["reject"])} if "reject" in rows else {}),
         },
         "latency_ms": {
             "p50": float(np.percentile(lat, 50)),
@@ -774,6 +783,9 @@ def main(
     typer.echo(f"  quad found: front {pl['quad_found_front']:.1%}  back {pl['quad_found_back']:.1%}"
                + (f"  ({pl['excluded_from_metrics']} fallback cards excluded from metrics)"
                   if "excluded_from_metrics" in pl else ""))
+    if "n_would_reject" in pl:
+        typer.echo("  /api/grade would refuse: " + "  ".join(
+            f"{k} {n}" for k, n in pl["n_would_reject"].items()))
     if pl.get("crop_kinds"):
         typer.echo("  crop kinds: " + "  ".join(
             f"{k} n={v['n']} MAE {v['mae']:.2f}" for k, v in pl["crop_kinds"].items()))
