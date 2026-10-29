@@ -26,6 +26,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image, ImageOps, TiffImagePlugin
+from PIL import __version__ as pillow_version
 
 from backend.app.ml.inference import GradeInferenceService
 from backend.app.ml.preprocess import ImageDecodeError, decode_image, detect_and_crop
@@ -267,14 +268,27 @@ TIFF_CASES = {
 }
 
 
+def _pil_load_error(data: bytes) -> BaseException | None:
+    """What this Pillow's own TIFF `load()` raises on `data`, or None if it loads."""
+    try:
+        Image.open(io.BytesIO(data)).load()
+    except Exception as exc:  # noqa: BLE001
+        return exc
+    return None
+
+
 @pytest.mark.parametrize("case", sorted(TIFF_CASES))
 def test_d4_inputs_raise_what_pil_raises(portrait_rgb, case):
-    # Pins the inputs of the D4 tests below (and the PIL errors the safety net catches).
+    # Pins the inputs of the D4 tests below (and the PIL errors the safety net
+    # catches). Found on Pillow 12.1; Pillow 13 loads the interop-pointer TIFF
+    # without error, so a Pillow that no longer raises skips rather than fails.
     make, exc = TIFF_CASES[case]
-    im = Image.open(io.BytesIO(make(portrait_rgb)))
-    assert im.format == "TIFF"
-    with pytest.raises(exc):
-        im.load()
+    data = make(portrait_rgb)
+    assert Image.open(io.BytesIO(data)).format == "TIFF"
+    err = _pil_load_error(data)
+    if err is None:
+        pytest.skip(f"Pillow {pillow_version} loads the {case} TIFF without error")
+    assert isinstance(err, exc)
 
 
 # Fixed 2026-10-28 (D4, owner-approved): bytes decode only as JPEG/PNG/WebP, so
@@ -293,10 +307,18 @@ def test_d4_tiff_with_an_unusable_ifd_is_a_decode_error_or_decodes(portrait_rgb,
 @pytest.mark.parametrize("case", sorted(TIFF_CASES))
 def test_d4_tiff_with_an_unusable_ifd_opened_by_the_caller_is_a_decode_error(portrait_rgb, case):
     # A PIL input skips the format check, so PIL's own KeyError / OverflowError
-    # from load() is what the widened `_DECODE_ERRORS` must catch.
+    # from load() is what the widened `_DECODE_ERRORS` must catch. On a Pillow
+    # that loads the file cleanly (Pillow 13, interop pointer), it must decode.
     make, exc = TIFF_CASES[case]
+    data = make(portrait_rgb)
+    err = _pil_load_error(data)
+    if err is None:
+        bgr, _ = decode_image(Image.open(io.BytesIO(data)))
+        assert bgr.ndim == 3
+        return
+    assert isinstance(err, exc)
     with pytest.raises(ImageDecodeError) as info:
-        decode_image(Image.open(io.BytesIO(make(portrait_rgb))))
+        decode_image(Image.open(io.BytesIO(data)))
     assert isinstance(info.value.__cause__, exc)
 
 
