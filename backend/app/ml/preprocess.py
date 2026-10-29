@@ -44,6 +44,7 @@ A YOLO upgrade is straightforward to swap in later.
 from __future__ import annotations
 
 import io
+import struct
 from dataclasses import dataclass
 
 import cv2
@@ -56,6 +57,51 @@ CARD_H = 840
 # the cap applied to every training photo at ingest.
 MAX_LONG_EDGE = 1024
 _EXIF_ORIENTATION = 0x0112
+# EXIF orientation -> the transpose that turns the image upright, as in
+# `ImageOps.exif_transpose`.
+_EXIF_TRANSPOSE = {
+    2: Image.Transpose.FLIP_LEFT_RIGHT,
+    3: Image.Transpose.ROTATE_180,
+    4: Image.Transpose.FLIP_TOP_BOTTOM,
+    5: Image.Transpose.TRANSPOSE,
+    6: Image.Transpose.ROTATE_270,
+    7: Image.Transpose.TRANSVERSE,
+    8: Image.Transpose.ROTATE_90,
+}
+# The only formats `decode_image` opens from bytes: the ones `/api/grade`
+# accepts (`backend.app.api.grade.ALLOWED_TYPES`: image/jpeg, image/png,
+# image/webp; keep the two in sync). The content type is client-declared, so
+# without this any format PIL knows (TIFF, GIF, BMP, ...) would reach its
+# decoder; bytes of another format are an `ImageDecodeError` (400). Stored
+# training photos are JPEG (`ml.data.image_io`).
+UPLOAD_FORMATS = ("JPEG", "PNG", "WEBP")
+# What PIL raises for a file it can't decode. Besides `OSError` (unidentified,
+# truncated, or not one of `UPLOAD_FORMATS`) its plugins raise `SyntaxError`
+# ("broken PNG file", "not a TIFF file"), `ValueError`, `IndexError`,
+# `TypeError` and `struct.error` on malformed headers and chunks. `KeyError`
+# and `OverflowError` are a safety net: PIL's TIFF loader raised them for a
+# malformed IFD (a sub-IFD pointer in the wrong IFD, a strip offset past
+# `ssize_t`), and the allowed formats' decoders share that code.
+_DECODE_ERRORS = (
+    OSError,
+    SyntaxError,
+    ValueError,
+    IndexError,
+    TypeError,
+    KeyError,
+    OverflowError,
+    struct.error,
+    Image.DecompressionBombError,
+)
+
+
+class ImageDecodeError(ValueError):
+    """The upload isn't a readable image (corrupt, truncated, or not an image).
+    `face` ("front" / "back") is set once the caller knows which upload it was."""
+
+    def __init__(self, message: str, face: str | None = None) -> None:
+        super().__init__(message)
+        self.face = face
 
 
 @dataclass(slots=True)
@@ -537,12 +583,48 @@ def decode_image(image: bytes | bytearray | Image.Image) -> tuple[np.ndarray, fl
     dropped) and, if its long edge exceeds `MAX_LONG_EDGE`, resized with
     LANCZOS to exactly that, rounding like `ml.data.image_io.compress_jpeg`.
     `scale` is the normalised size over the decoded size, 1.0 when not resized.
+
+    Bytes are opened only as one of `UPLOAD_FORMATS` (JPEG, PNG, WebP); any
+    other format is an `ImageDecodeError`. A PIL `Image.Image` is passed in
+    already opened, so its format isn't checked: the caller chose it.
+
+    Once the image opens, a malformed EXIF block never rejects it: an
+    orientation that can't be read is taken as upright, and one that reads is
+    applied even when the rest of the block is broken (`_apply_exif_orientation`).
+    The exception is EXIF PIL reads while opening: a JPEG whose EXIF makes
+    PIL's JPEG `open` fail (e.g. a one-element XResolution, with
+    ResolutionUnit set, raises `IndexError` in its dpi read) is reported by PIL
+    as unidentified, so it is an `ImageDecodeError` (owner decision 2026-10-28:
+    rare, accepted as a 400).
+
+    Raises `ImageDecodeError` when PIL can't decode the image (any of
+    `_DECODE_ERRORS`, chained). Only the decode below is wrapped: its body is
+    PIL calls, `np.array` and `cv2.cvtColor`, so no other error becomes one.
     """
-    pil = Image.open(io.BytesIO(image)) if isinstance(image, (bytes, bytearray)) else image
-    # Both calls copy the image even when there is nothing to do, which costs
-    # ~10 ms on a 12 MP photo, so skip them when they're no-ops.
-    if pil.getexif().get(_EXIF_ORIENTATION, 1) != 1:
-        pil = ImageOps.exif_transpose(pil)
+    try:
+        return _decode_image(image)
+    except ImageDecodeError:  # a ValueError itself: never wrap it twice
+        raise
+    except _DECODE_ERRORS as exc:
+        raise ImageDecodeError(str(exc) or type(exc).__name__) from exc
+
+
+def _decode_image(image: bytes | bytearray | Image.Image) -> tuple[np.ndarray, float]:
+    if isinstance(image, (bytes, bytearray)):
+        # Another format raises UnidentifiedImageError (an OSError).
+        pil = Image.open(io.BytesIO(image), formats=UPLOAD_FORMATS)
+    else:
+        pil = image
+    # `Image.open` is lazy: decode the pixels first, so that a failure in the
+    # EXIF steps below can only come from the EXIF block, never the pixels
+    # (after a failed load PIL would hand back the partial image).
+    pil.load()
+    # A palette image without its palette (a PNG of colour type 3 with no PLTE
+    # chunk) can't be coloured, and PIL's convert asserts on it when it has a
+    # transparency entry, so refuse it here as unreadable.
+    if pil.mode in ("P", "PA") and pil.palette is None:
+        raise ImageDecodeError("palette image has no palette")
+    pil = _apply_exif_orientation(pil)
     if pil.mode != "RGB":
         pil = pil.convert("RGB")
     w, h = pil.size
@@ -552,6 +634,32 @@ def decode_image(image: bytes | bytearray | Image.Image) -> tuple[np.ndarray, fl
         scale = MAX_LONG_EDGE / longest
         pil = pil.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
     return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR), scale
+
+
+def _apply_exif_orientation(pil: Image.Image) -> Image.Image:
+    """`pil` turned upright per its EXIF orientation, as `ImageOps.exif_transpose`
+    does. `pil` must already be loaded.
+
+    A malformed EXIF block never fails the decode. When the orientation can't be
+    read, or isn't 2-8, the image is taken as upright and returned as is. When it
+    reads but `exif_transpose` fails (it re-serialises the EXIF after rotating,
+    which raises e.g. `AttributeError` for an ASCII tag holding a rational), the
+    known orientation is applied directly, giving the same pixels.
+
+    Both steps catch any `Exception`, not just `_DECODE_ERRORS`: the pixels are
+    already decoded, so a failure here can only come from the EXIF block and
+    can't hide a truncated image. Nothing else in the decode is broadened.
+    """
+    try:
+        method = _EXIF_TRANSPOSE.get(pil.getexif().get(_EXIF_ORIENTATION, 1))
+    except Exception:  # unreadable EXIF (or an unhashable tag value): upright
+        return pil
+    if method is None:  # upright (1), absent or out of range. `exif_transpose`
+        return pil  # would only copy, ~10 ms on a 12 MP photo, so skip it.
+    try:
+        return ImageOps.exif_transpose(pil)
+    except Exception:  # the orientation is known: apply it without the EXIF
+        return pil.transpose(method)
 
 
 def detect_and_crop(image: np.ndarray | bytes | Image.Image) -> CardCrop:

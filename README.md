@@ -6,9 +6,9 @@ This project is independent and not affiliated with PSA or eBay. Respect each pl
 
 ## What it does
 
-1. **Detect & dewarp** — normalises the upload like the training photos (upright per its EXIF orientation, at most 1024 px on the long edge), finds the card in the photo (including slab shots) and warps it to a 600×840 canvas. If no card outline is found in a landscape photo, it retries once with the photo turned 90°, so a sideways shot is still found (possibly upside down). Portrait photos aren't retried, since the turned search finds false outlines on them, so a sideways card inside a portrait photo isn't found. Failing that, the whole photo is padded onto the canvas and the response notes it.
+1. **Detect & dewarp** — normalises the upload like the training photos (upright per its EXIF orientation, at most 1024 px on the long edge), finds the card in the photo (including slab shots) and warps it to a 600×840 canvas. If no card outline is found in a landscape photo, it retries once with the photo turned 90°, so a sideways shot is still found (possibly upside down). Portrait photos aren't retried, since the turned search finds false outlines on them, so a sideways card inside a portrait photo isn't found. Failing that, `/api/grade` returns 422 "card not found; retake the photo on a plain background" (with the legacy model, the whole photo is padded onto the canvas and graded, with a note).
 2. **Region features** — a frozen DINOv2 ViT-B (self-supervised, not fine-tuned) summarises each face as 11 vectors: CLS, mean, 4 corners, 4 edge strips, centre.
-   - **Face guard** (when `data/models/face_guard.npz` is trained) — small probes on those features check that the front photo is a front, the back a back, and that each is upright. Swapped photos are graded the other way round and an upside-down face is rotated and re-read, each with a note (see [Face guard](#face-guard)).
+   - **Face guard** (when `data/models/face_guard.npz` is trained) — small probes on those features check that the front photo is a front, the back a back, and that each is upright. Swapped photos are graded the other way round and an upside-down face is rotated and re-read, each with a note; two photos of the same side get a 422 (see [Face guard](#face-guard)).
 3. **Overall grade** — linear proportional-odds (ordinal) probes over the corner, edge, centre and global features of both faces, stacked into one ordinal model.
 4. **Sub-grades**:
    - **Corners / edges / surface** — the soft grade each region probe gives on its own. They are learned from overall PSA grades (no sub-grade labels exist), so read them as "what this region suggests", not PSA's own sub-grade.
@@ -308,13 +308,15 @@ head, it fails open: a guard whose sidecar is missing, unreadable or records
 another `feature_spec_hash` is dropped with a WARNING and
 `face_guard_load_error` in `/api/health` metadata, and grading runs as without
 it. When a `face_guard.npz` exists, `/api/health` metadata `face_guard` says whether it loaded and which checks
-are enabled. Retrain it whenever the feature spec changes. Its response notes:
+are enabled. Retrain it whenever the feature spec changes. What it does to a request:
 
-- `front and back photos looked swapped; graded them the other way round`:
-  the front upload read as a card back and the back upload as a front.
-- `both photos look like card backs` (or `fronts`): graded as uploaded, but
-  the grade is unreliable; upload one photo of each side.
-- `front photo was upside down; rotated it` (or `back`): that face was turned
+- `front and back photos looked swapped; graded them the other way round`
+  (note): the front upload read as a card back and the back upload as a front.
+- Both uploads read as card backs (or both as fronts): `/api/grade` refuses the
+  pair with 422 `both photos look like card backs; upload one photo of the front
+  and one of the back`. `ml.eval` still grades such pairs, keeping the note
+  `both photos look like card backs`, and counts them in `n_would_reject`.
+- `front photo was upside down; rotated it` (or `back`) (note): that face was turned
   180° and its features re-extracted (about 1.4 s more on CPU).
 
 Restart the API afterwards. The rest of this section is the legacy end-to-end
@@ -511,6 +513,17 @@ pytest
 |---|---|---|
 | `GET` | `/api/health` | Service status, whether a model is loaded, its metadata (and `probe_load_error` when the probe didn't load) |
 | `POST` | `/api/grade` | Multipart upload: `front` + `back` images (JPEG/PNG/WebP, max 12 MB each) |
+
+`/api/grade` errors. `detail` is a string, and the frontend shows it as is. Errors about an upload start with its face (`"front: ..."`, `"back: ..."`, or `"front and back: ..."` when card not found applies to both); the same-side 422 and the 503 name no face. FastAPI's own 422 for a missing `front`/`back` field has a list `detail` instead.
+
+| Status | When |
+|---|---|
+| 400 | Empty upload, or not a readable image (corrupt, truncated, not an image, or not a JPEG, PNG or WebP whatever its declared content type). Once a photo opens, a malformed EXIF block is ignored: the photo is graded with its orientation applied if that can be read, else as upright. Rarely, a JPEG whose EXIF makes the image library fail to open it (e.g. a one-value XResolution) is refused as unreadable |
+| 413 | Image over 12 MB |
+| 415 | Content type isn't JPEG, PNG or WebP |
+| 422 | Probe model: no card outline found on a face ("card not found; retake the photo on a plain background"), or the face guard reads both photos as backs (or both as fronts). Also a missing `front`/`back` field |
+| 503 | No grade model loaded (`/api/health` says why) |
+
 
 ## License / disclaimer
 

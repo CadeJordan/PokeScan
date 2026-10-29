@@ -70,6 +70,7 @@ class GuardDecision:
     notes: list[str] = field(default_factory=list)
     p_back: tuple[float, float] | None = None   # P(back) per uploaded row, if checked
     p_flip: tuple[float, float] | None = None   # P(flipped) per face after the swap
+    same_side: str | None = None   # "front" / "back": both rows read as that side
 
 
 @dataclass(slots=True)
@@ -160,7 +161,9 @@ class FaceGuard:
         """
         swap, notes, p_back = self.check_sides(feats)
         if notes and not swap:  # same-side pair: note only
-            return GuardDecision(False, (False, False), notes, p_back, None)
+            # Both rows are past the same threshold, so row 0 tells which side.
+            side = "back" if p_back[0] > 0.5 else "front"
+            return GuardDecision(False, (False, False), notes, p_back, None, side)
         rows = feats[::-1] if swap else feats
         flip, flip_notes, p_flip = self.check_orientation(rows)
         return GuardDecision(swap, flip, notes + flip_notes, p_back, p_flip)

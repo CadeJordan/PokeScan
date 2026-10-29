@@ -10,12 +10,14 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from backend.app.ml.inference import GradePrediction, get_inference_service
+from backend.app.ml.preprocess import ImageDecodeError
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["grade"])
 
 MAX_BYTES = 12 * 1024 * 1024  # 12 MB per image
+# Keep in sync with `preprocess.UPLOAD_FORMATS`, the formats decoded from bytes.
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
@@ -96,8 +98,16 @@ async def grade_card(
     # off the event loop so other requests (e.g. /health) aren't blocked.
     try:
         pred: GradePrediction = await run_in_threadpool(service.predict, front_bytes, back_bytes)
+    except ImageDecodeError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=f"{exc.face or 'image'}: not a readable image (corrupt or truncated file)",
+        ) from exc
     except RuntimeError as exc:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+    rejection = pred.rejection()
+    if rejection is not None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=rejection[1])
 
     # Face guard notes first (swap / rotation): the notes below describe the
     # faces as graded, i.e. after the guard.
