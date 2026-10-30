@@ -637,12 +637,16 @@ def test_both_faces_missing_after_a_swap_names_both(tmp_path, blank, monkeypatch
     assert pred.rejection() == ("card_not_found", f"front and back: {CARD_NOT_FOUND}")
 
 
-def test_a_rotated_fallback_face_is_still_card_not_found(tmp_path, pair, blank, monkeypatch):
-    # The guard turns the (blank) uploaded front 180 degrees; it still has no quad.
+def test_a_fallback_face_read_as_flipped_is_still_card_not_found(
+    tmp_path, pair, blank, monkeypatch
+):
+    # The (blank) uploaded front reads as flipped, but it has no card, so the
+    # guard leaves it alone (guard-skip-orientation-without-card); still 422.
     flipped = _feats(flip=(10.0, -10.0))
     svc = _service(tmp_path, _guard(), flipped, _feats())
     pred = svc.predict(blank, pair[1])
-    assert any("upside down" in n for n in pred.notes)
+    assert not any("upside down" in n for n in pred.notes)
+    assert pred.guard_decision.no_card == (True, False)
     assert pred.rejection() == ("card_not_found", f"front: {CARD_NOT_FOUND}")
     r = _post(_service(tmp_path, _guard(), flipped, _feats()), monkeypatch, blank, pair[1])
     assert r.status_code == 422 and r.json()["detail"] == f"front: {CARD_NOT_FOUND}"

@@ -477,7 +477,9 @@ class GradeInferenceService:
         decision = None
         if self._guard is not None:
             try:
-                decision = self._guard.decide(feats)
+                decision = self._guard.decide(
+                    feats, (front_crop.found_quad, back_crop.found_quad)
+                )
             except Exception:  # noqa: BLE001 - a bad guard never fails the request
                 log.warning(
                     "face guard %s failed on this request; graded it unguarded",

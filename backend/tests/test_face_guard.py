@@ -452,3 +452,89 @@ def test_guard_probabilities_stay_out_of_the_response(client, fake_service, scen
     assert set(body) == set(GradeResponse.model_fields)
     assert "p_back" not in r.text and "p_flip" not in r.text
     assert body["confidence"] == plain["confidence"] and body["grade"] == plain["grade"]
+
+
+# --------------------------------------------------------------------------- #
+# No card outline: the orientation check leaves the face alone
+# --------------------------------------------------------------------------- #
+@pytest.fixture(scope="module")
+def blank() -> bytes:
+    """A photo with no card in it: detection falls back to the padded canvas."""
+    return to_jpeg_bytes(np.full((1000, 750, 3), 128, np.uint8))
+
+
+@pytest.mark.parametrize("quad", [True, False])
+@pytest.mark.parametrize("face", [0, 1])
+def test_decide_flips_a_face_only_when_its_card_was_found(face, quad):
+    flip = [-10.0, -10.0]
+    flip[face] = 10.0
+    found = [True, True]
+    found[face] = quad
+    d = _guard().decide(_feats(flip=tuple(flip)), tuple(found))
+    want = [False, False]
+    want[face] = quad
+    assert d.flip == tuple(want)
+    no_card = [False, False]
+    no_card[face] = not quad
+    assert d.no_card == tuple(no_card)
+    label = ("front", "back")[face]
+    assert d.notes == ([f"{label} photo was upside down; rotated it"] if quad else [])
+    assert d.p_flip[face] > 0.99  # still measured and reported
+
+
+def test_decide_card_flags_follow_the_swap():
+    # Uploaded front reads as a back and has no card; both rows read as flipped.
+    # After the swap the graded front is the uploaded back (card found), so only
+    # it is rotated.
+    d = _guard().decide(_feats(side=(10.0, -10.0), flip=(10.0, 10.0)), (False, True))
+    assert d.swap and d.flip == (True, False) and d.no_card == (False, True)
+    assert d.notes == [NOTE_SWAPPED, "front photo was upside down; rotated it"]
+    assert d.p_flip[0] > 0.99 and d.p_flip[1] > 0.99
+
+
+def test_decide_no_card_is_only_set_for_enabled_checks():
+    feats = _feats(flip=(10.0, 10.0))
+    assert _guard(enabled=("side",)).decide(feats, (False, False)).no_card == (False, False)
+    d = _guard(enabled=("side", "front_upright")).decide(feats, (True, False))
+    assert d.flip == (True, False) and d.no_card == (False, False)
+    d = _guard(enabled=("side", "front_upright")).decide(feats, (False, True))
+    assert d.flip == (False, False) and d.no_card == (True, False)
+
+
+def test_decide_defaults_to_cards_found():
+    feats = _feats(side=(10.0, -10.0), flip=(10.0, -10.0))
+    assert _guard().decide(feats) == _guard().decide(feats, (True, True))
+
+
+def test_no_card_front_is_not_rotated_by_the_service(tmp_path, pair, blank):
+    svc = _service(tmp_path, _guard(), _feats(flip=(10.0, -10.0)), _feats(tag=9.0))
+    pred = svc.predict(blank, pair[1])
+    assert (pred.found_quad_front, pred.found_quad_back) == (False, True)
+    assert pred.notes == [] and svc._extractor.calls == 1
+    np.testing.assert_array_equal(svc._head.seen[0], _feats(flip=(10.0, -10.0)))
+    np.testing.assert_array_equal(pred.crops[0].image, detect_and_crop(blank).image)
+    d = pred.guard_decision
+    assert d.flip == (False, False) and d.no_card == (True, False) and d.p_flip[0] > 0.99
+
+
+def test_no_card_back_still_lets_the_front_be_rotated(tmp_path, pair, blank):
+    second = _feats(tag=9.0)
+    svc = _service(tmp_path, _guard(), _feats(flip=(10.0, 10.0)), second)
+    pred = svc.predict(pair[0], blank)
+    assert pred.notes == ["front photo was upside down; rotated it"]
+    assert svc._extractor.calls == 2
+    np.testing.assert_array_equal(svc._head.seen[0], second)
+    np.testing.assert_array_equal(pred.crops[0].image, detect_and_crop(pair[0]).image[::-1, ::-1])
+    np.testing.assert_array_equal(pred.crops[1].image, detect_and_crop(blank).image)
+    assert pred.guard_decision.no_card == (False, True)
+
+
+def test_swapped_no_card_face_is_not_rotated_by_the_service(tmp_path, pair, blank):
+    # Uploaded back is the no-card photo and reads as a flipped front: it is
+    # swapped into the front slot but not rotated.
+    svc = _service(tmp_path, _guard(), _feats(side=(10.0, -10.0), flip=(-10.0, 10.0)))
+    pred = svc.predict(pair[0], blank)
+    assert pred.notes == [NOTE_SWAPPED] and svc._extractor.calls == 1
+    assert (pred.found_quad_front, pred.found_quad_back) == (False, True)
+    np.testing.assert_array_equal(pred.crops[0].image, detect_and_crop(blank).image)
+    assert pred.guard_decision.no_card == (True, False)

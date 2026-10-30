@@ -491,7 +491,7 @@ def test_no_side_check_means_no_same_side_rejection(tmp_path, pair):
 def test_guard_error_grades_unguarded(tmp_path, pair, monkeypatch):
     from backend.app.ml.face_guard import FaceGuard
 
-    def decide(self, feats):
+    def decide(self, feats, found_quad=(True, True)):
         raise FloatingPointError("boom")
 
     monkeypatch.setattr(FaceGuard, "decide", decide)
