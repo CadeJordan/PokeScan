@@ -20,6 +20,8 @@ Metrics
 - pipeline: card-quad found rate, MAE split by quad found vs. fallback
 - robustness: MAE delta / grade-flip rate under blur, JPEG, rotation, lighting,
   and swapped front/back uploads (`--perturbations` picks a subset)
+- face guard: per prediction, and per cert in each robustness run, the guard's
+  P(back) / P(flipped) when a guard scored it (`p_back`, `p_flip`)
 - speed: p50 / p95 latency per front+back pair
 - baselines: majority-grade and train-mean predictors
 """
@@ -272,9 +274,18 @@ def apply_perturbation(name: str, front: bytes, back: bytes) -> tuple[bytes, byt
     """Perturbed (front, back) upload bytes: a pair perturbation, or an image one per face."""
     if name in PAIR_PERTURBATIONS:
         return PAIR_PERTURBATIONS[name](front, back)
+    return perturb_image(name, front), perturb_image(name, back)
+
+
+def perturb_image(name: str, image: bytes) -> bytes:
+    """One upload's bytes under the image perturbation `name`: decoded with
+    `cv2.imdecode`, perturbed, and re-encoded as JPEG quality 95 (`_encode`).
+
+    `ml.training.train_face_guard` builds its served-path rotated faces with
+    `perturb_image("rotate_180", ...)`, so they match this harness's `rotate_180`.
+    """
     fn = PERTURBATIONS[name]
-    f, b = (_encode(fn(cv2.imdecode(np.frombuffer(x, np.uint8), cv2.IMREAD_COLOR))) for x in (front, back))
-    return f, b
+    return _encode(fn(cv2.imdecode(np.frombuffer(image, np.uint8), cv2.IMREAD_COLOR)))
 
 
 def _encode(bgr: np.ndarray) -> bytes:
@@ -379,7 +390,7 @@ def predict_all(
 
     keys = ("cert", "grade", "pred_int", "pred_soft", "confidence", "quad_front", "quad_back",
             "latency", "crop_kind", "notes", "reject")
-    rows = {k: [] for k in keys}
+    rows = {k: [] for k in (*keys, *GUARD_PROBS)}
     it = tqdm(samples, desc=perturb or "eval", disable=not progress)
     for s in it:
         front, back = s.front.read_bytes(), s.back.read_bytes()
@@ -400,7 +411,28 @@ def predict_all(
         rows["quad_front"].append(p.found_quad_front)
         rows["quad_back"].append(p.found_quad_back)
         rows["crop_kind"].append(s.crop_kind)
+        decision = getattr(p, "guard_decision", None)
+        for key in GUARD_PROBS:
+            rows[key].append(_pair(getattr(decision, key, None)))
     return {k: np.asarray(v) for k, v in rows.items()}
+
+
+# The face guard's probabilities per prediction, (n, 2) with NaN where the guard
+# didn't compute one: P(back) per uploaded row, P(flipped) per face after a swap.
+GUARD_PROBS = ("p_back", "p_flip")
+
+
+def _pair(p) -> tuple[float, float]:
+    return (float("nan"), float("nan")) if p is None else (float(p[0]), float(p[1]))
+
+
+def _guard_probs(rows: dict, i: int) -> dict:
+    """The guard probabilities of row `i` that were computed, rounded for the report."""
+    out = {}
+    for key in GUARD_PROBS:
+        if key in rows and np.isfinite(rows[key][i]).all():
+            out[key] = [round(float(v), 6) for v in rows[key][i]]
+    return out
 
 
 def filter_rows(rows: dict, mask: np.ndarray) -> dict:
@@ -472,8 +504,9 @@ def build_report(
                 "pred_int": int(i),
                 "pred_soft": float(f),
                 **({"notes": str(n)} if n else {}),
+                **_guard_probs(rows, k),
             }
-            for c, g, i, f, n in zip(rows["cert"], true, pi, ps, notes, strict=True)
+            for k, (c, g, i, f, n) in enumerate(zip(rows["cert"], true, pi, ps, notes, strict=True))
         ]
     return report
 
@@ -507,6 +540,9 @@ def robustness(service, samples: list[Sample], clean_rows: dict, names: list[str
             "cert": certs,
             "pred_int": [int(v) for v in rows["pred_int"]],
             "pred_soft": [round(float(v), 4) for v in rows["pred_soft"]],
+            "notes": [str(x) for x in notes] if notes is not None else [""] * n,
+            # The face guard's probabilities per cert ({} without a guard).
+            "guard": [_guard_probs(rows, i) for i in range(n)],
         }
     return out
 

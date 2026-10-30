@@ -282,26 +282,39 @@ hashes differ.
 ### Face guard
 
 ```powershell
-python -m ml.training.train_face_guard    # after train_probe; one GPU pass over rotated crops
+python -m ml.training.train_face_guard                     # after train_probe; GPU pass over the DB photos
+python -m ml.training.train_face_guard --features precrop  # the 2026-10-28 source (stored precrops)
 ```
 
 Trains three logistic probes over each face's CLS + mean features: front vs
 back (on both orientations), and upright vs upside down for fronts and for
-backs. It reads the upright features from `train_probe`'s cache (never
-rewriting it), extracts features of every precrop rotated 180° into
-`data/models/cache/region_feats_rot180.npz` (keyed like the main cache), and
-picks each probe's threshold from card-grouped 5-fold CV on train+val: the
+backs. By default (`--features served`, since 2026-10-29) the features come
+from the original DB photos run through the API's own preprocessing
+(`inference.served_extractor_input`: decode, EXIF transpose, 1024 px cap,
+detection, JPEG round trip), upright and with the photo rotated 180° first
+exactly as `ml.eval.evaluate`'s `rotate_180` does. They are cached in
+`data/models/cache/region_feats_served.npz` and
+`region_feats_served_rot180.npz` (keyed like the main cache on the photo
+files). A change to the detection code doesn't invalidate them: delete them
+after changing preprocessing. That run also reports how the precrop-trained
+probes do on served faces out of fold (`transfer_from_precrop`), reading the
+precrop caches without writing them. `--features precrop` trains the old way:
+upright features from `train_probe`'s cache (never rewritten) and every
+precrop rotated 180° in `data/models/cache/region_feats_rot180.npz`. Either
+way it picks each probe's threshold from card-grouped 5-fold CV on train+val: the
 lowest of 0.9 / 0.95 / 0.99 whose false-positive rate on correctly placed,
 upright faces is at most 0.2%. A check that misses its gate (side: CV error
 ≤ 0.3% and AUC ≥ 0.999; upright: AUC ≥ 0.99), or for which no threshold in
-{0.9, 0.95, 0.99} meets FPR ≤ 0.2%, is stored but disabled. The shipped guard
-(2026-10-28) has `back_upright` disabled for that reason, so only swapped
+{0.9, 0.95, 0.99} meets FPR ≤ 0.2%, is stored but disabled. The shipped guards
+(2026-10-28, and the served-feature one of 2026-10-29) have `back_upright`
+disabled for that reason, so only swapped
 photos and upside-down fronts are corrected; an upside-down back is graded as
 uploaded. A pair whose photos both read as backs (or both as fronts) gets a
 note and no rotation. Writes
 `data/models/face_guard.npz` + `face_guard.json` (enabled checks, thresholds,
-CV and test metrics, `feature_spec_hash`) and
-`test-artifacts/eval/face_guard_report.json`.
+CV and test metrics, `feature_spec_hash`, `feature_source`) and
+`test-artifacts/eval/face_guard_report.json` (`--report` to write it elsewhere,
+`--no-save` to write no guard).
 
 The API loads the guard when `face_guard.npz` sits next to the head. Unlike the
 head, it fails open: a guard whose sidecar is missing, unreadable or records
@@ -457,7 +470,10 @@ The robustness runs (100 cards each by default, `--robustness-limit`) cover
 blur, JPEG, rotation and lighting perturbations of both photos, plus
 `swap_faces` (front and back uploads exchanged). `--perturbations` takes a
 comma list; the default runs all of them. The report lists each cert's
-prediction (`predictions`), so two runs can be compared cert by cert.
+prediction (`predictions`), so two runs can be compared cert by cert. With a
+face guard loaded, each prediction also carries the guard's `p_back` (per
+uploaded photo) and `p_flip` (per face, after any swap), and each robustness
+run lists every cert's `notes` and `guard` probabilities.
 
 The report includes 95% bootstrap CIs for MAE, QWK, exact and bias, plus a
 per-grade table with a Wilson CI on recall and a bootstrap CI on MAE. Low

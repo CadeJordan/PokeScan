@@ -64,7 +64,7 @@ def load_rows(db_path: Path) -> list[sqlite3.Row]:
     try:
         return conn.execute(
             "SELECT cert_number, grade_int, split, brand_title, subject, card_number, "
-            "cropped_front_path, cropped_back_path FROM certs "
+            "cropped_front_path, cropped_back_path, front_path, back_path FROM certs "
             "WHERE is_pokemon=1 AND has_images=1 AND grade_int IS NOT NULL "
             "AND split IN ('train', 'val', 'test') "
             "AND crop_found_front=1 AND crop_found_back=1 "
@@ -98,18 +98,25 @@ def extract_features(
     transform=None,
     variant: str = "",
     save: bool = True,
+    path_keys: tuple[str, str] = ("cropped_front_path", "cropped_back_path"),
+    load=None,
+    workers: int = 1,
 ) -> np.ndarray:
-    """(N, 2, n_regions, D) float32 features, reusing cached certs whose crop files are unchanged.
+    """(N, 2, n_regions, D) float32 features, reusing cached certs whose source files are unchanged.
 
     Cache keys are (cert, front path, back path, front sig, back sig), sig being
-    the crop file's "size:mtime_ns", so a rewritten crop is re-extracted. The
+    the source file's "size:mtime_ns", so a rewritten file is re-extracted. The
     whole cache is discarded when it was built from another feature spec, and
     only the current rows' entries are saved back.
 
-    `transform` (RGB -> RGB) is applied to each crop before `to_input`; a cache
-    of transformed crops must name it in `variant` (e.g. "rot180"), which the
-    cache records and must match like the feature spec. `save=False` reads the
-    cache but never writes it (missing certs are still extracted).
+    The source files are the row's `path_keys` columns (default the precrops),
+    relative to `data_dir`. `load` (Path -> RGB) reads one into the image fed to
+    `to_input` (default: the file decoded as is); `transform` (RGB -> RGB) is
+    applied after it. A cache of other sources, loaders or transforms must name
+    them in `variant` (e.g. "rot180"), which the cache records and must match
+    like the feature spec. `save=False` reads the cache but never writes it
+    (missing certs are still extracted). `workers` > 1 loads a batch's images in
+    that many threads (the result doesn't depend on it).
     """
     import torch
 
@@ -131,33 +138,43 @@ def extract_features(
                     spec_hash,
                     variant,
                 )
+    front_key, back_key = path_keys
     keys = [
         (
             r["cert_number"],
-            r["cropped_front_path"],
-            r["cropped_back_path"],
-            _file_sig(data_dir / r["cropped_front_path"]),
-            _file_sig(data_dir / r["cropped_back_path"]),
+            r[front_key],
+            r[back_key],
+            _file_sig(data_dir / r[front_key]),
+            _file_sig(data_dir / r[back_key]),
         )
         for r in rows
     ]
     todo = [i for i, k in enumerate(keys) if k not in cached]
-    log.info("features: %d cached, %d to extract", len(keys) - len(todo), len(todo))
+    log.info("features %s: %d cached, %d to extract", cache.name, len(keys) - len(todo), len(todo))
+    read = load or _read_rgb
+
+    def image(path: str) -> np.ndarray:
+        rgb = read(data_dir / path)
+        return to_input(transform(rgb) if transform else rgb)
+
     if todo:
+        from concurrent.futures import ThreadPoolExecutor
+
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model = model_factory().to(device)
-        with torch.no_grad():
-            for s in tqdm(range(0, len(todo), batch), desc="features"):
-                idx = todo[s : s + batch]
-                imgs = [
-                    to_input(transform(rgb) if transform else rgb)
-                    for i in idx
-                    for side in (1, 2)
-                    for rgb in (_read_rgb(data_dir / keys[i][side]),)
-                ]
-                out = model(torch.from_numpy(np.stack(imgs)).to(device)).float().cpu().numpy()
-                for j, i in enumerate(idx):
-                    cached[keys[i]] = out[2 * j : 2 * j + 2].astype(np.float16)
+        pool = ThreadPoolExecutor(workers) if workers > 1 else None
+        try:
+            with torch.no_grad():
+                for s in tqdm(range(0, len(todo), batch), desc="features"):
+                    idx = todo[s : s + batch]
+                    paths = [keys[i][side] for i in idx for side in (1, 2)]
+                    imgs = list(pool.map(image, paths)) if pool else [image(p) for p in paths]
+                    out = model(torch.from_numpy(np.stack(imgs)).to(device)).float().cpu().numpy()
+                    for j, i in enumerate(idx):
+                        cached[keys[i]] = out[2 * j : 2 * j + 2].astype(np.float16)
+        finally:
+            if pool is not None:
+                pool.shutdown()
     if save and (todo or set(cached) != set(keys)):
         # Save the current rows only: entries for dropped certs or old crops go.
         cache.parent.mkdir(parents=True, exist_ok=True)

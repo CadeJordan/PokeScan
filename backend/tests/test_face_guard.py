@@ -201,6 +201,22 @@ def test_both_faces_flipped_extract_once_more(tmp_path, pair):
     assert svc._extractor.calls == 2
 
 
+def test_prediction_carries_the_guard_decision(tmp_path, pair):
+    # Rows swapped, and the real front (row 1) flipped: p_back is per uploaded
+    # row, p_flip per face after the swap.
+    svc = _service(tmp_path, _guard(), _feats(side=(10.0, -10.0), flip=(-10.0, 10.0)), _feats())
+    pred = svc.predict(*pair)
+    d = pred.guard_decision
+    assert d.swap and d.flip == (True, False) and d.notes == pred.notes
+    assert d.p_back[0] > 0.99 and d.p_back[1] < 0.01
+    assert d.p_flip[0] > 0.99 and d.p_flip[1] < 0.01
+    plain = _service(tmp_path, None, _feats()).predict(*pair)
+    assert plain.guard_decision is None
+    # Not part of the prediction's value.
+    unguarded = _service(tmp_path, _guard(enabled=()), _feats()).predict(*pair)
+    assert unguarded.guard_decision is not None and unguarded == plain
+
+
 def test_upright_pair_extracts_once(tmp_path, pair):
     svc = _service(tmp_path, _guard(), _feats())
     pred = svc.predict(*pair)
@@ -413,3 +429,26 @@ def test_grade_response_includes_guard_notes(client, fake_service, scene_jpeg):
     r = client.post("/api/grade", files=files)
     assert r.status_code == 200
     assert r.json()["notes"][0] == NOTE_SWAPPED
+
+
+def test_guard_probabilities_stay_out_of_the_response(client, fake_service, scene_jpeg):
+    """`GradePrediction.guard_decision` is for diagnostics: the response schema and
+    the confidence are what they are without it."""
+    from backend.app.api.grade import GradeResponse
+    from backend.app.ml.face_guard import GuardDecision
+
+    files = {
+        "front": ("f.jpg", scene_jpeg, "image/jpeg"),
+        "back": ("b.jpg", scene_jpeg, "image/jpeg"),
+    }
+    plain = client.post("/api/grade", files=files).json()
+    fake_service.prediction.guard_decision = GuardDecision(
+        True, (True, False), [NOTE_SWAPPED], (0.98, 0.01), (0.995, 0.2)
+    )
+    fake_service.prediction.notes = [NOTE_SWAPPED]
+    r = client.post("/api/grade", files=files)
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == set(GradeResponse.model_fields)
+    assert "p_back" not in r.text and "p_flip" not in r.text
+    assert body["confidence"] == plain["confidence"] and body["grade"] == plain["grade"]
