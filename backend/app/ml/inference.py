@@ -31,6 +31,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
@@ -45,6 +46,9 @@ from backend.app.ml.preprocess import (
     detect_and_crop,
     encode_jpeg,
 )
+
+if TYPE_CHECKING:
+    from backend.app.ml.face_guard import GuardDecision
 
 log = logging.getLogger(__name__)
 
@@ -94,6 +98,10 @@ class GradePrediction:
     swapped: bool = False
     # "front" / "back" when the guard read both faces as that side (graded as is).
     same_side: str | None = None
+    # The guard's decision with its probabilities (P(back) per uploaded row,
+    # P(flipped) per face after any swap), for diagnostics such as `ml.eval`.
+    # None without a guard. Not part of the prediction's value.
+    guard_decision: GuardDecision | None = field(default=None, compare=False, repr=False)
 
     def rejection(self) -> tuple[str, str] | None:
         """`(kind, message)` when `/api/grade` refuses this prediction (422), else None.
@@ -122,12 +130,32 @@ class GradePrediction:
         return None
 
 
-def _detect_face(image: bytes, label: str) -> CardCrop:
-    """`detect_and_crop`, with an undecodable upload's error naming its face."""
+def detect_face(image: bytes, label: str) -> CardCrop:
+    """`detect_and_crop` of one upload (decode, EXIF transpose, 1024 px cap,
+    detection), with an undecodable upload's error naming its face."""
     try:
         return detect_and_crop(image)
     except ImageDecodeError as exc:
         raise ImageDecodeError(f"{label}: {exc}", face=label) from exc
+
+
+def extractor_input(crop: CardCrop) -> np.ndarray:
+    """The RGB array the probe's feature extractor sees for `crop`.
+
+    Training read crops back from precrop's JPEGs, so the crop is JPEG
+    round-tripped to match that encoding.
+    """
+    return _jpeg_roundtrip(crop.image)
+
+
+def served_extractor_input(image: bytes, label: str = "face") -> np.ndarray:
+    """What the probe path feeds the extractor for the upload `image`.
+
+    `detect_face` then `extractor_input`: the steps `predict` runs on each
+    upload before its first extraction. `ml.training.train_face_guard` trains
+    the guard on features of this, so training and serving share one code path.
+    """
+    return extractor_input(detect_face(image, label))
 
 
 def _rotate_crop(crop: CardCrop) -> CardCrop:
@@ -394,8 +422,8 @@ class GradeInferenceService:
         if self._session is None:
             raise RuntimeError("grade model not loaded")
 
-        front_crop = _detect_face(front_bytes, "front")
-        back_crop = _detect_face(back_bytes, "back")
+        front_crop = detect_face(front_bytes, "front")
+        back_crop = detect_face(back_bytes, "back")
         if front_crop.image.shape[:2] != (CARD_H, CARD_W):
             raise RuntimeError("preprocessing produced wrong shape")
         if self.kind == "probe":
@@ -442,8 +470,7 @@ class GradeInferenceService:
     def _predict_probe(self, front_crop: CardCrop, back_crop: CardCrop) -> GradePrediction:
         from backend.app.ml.grade_head import decode
 
-        # Training read crops back from precrop's JPEGs; match that encoding.
-        front, back = (_jpeg_roundtrip(c.image) for c in (front_crop, back_crop))
+        front, back = (extractor_input(c) for c in (front_crop, back_crop))
         with self._lock:
             feats = self._extractor(front, back)
         notes: list[str] = []
@@ -466,7 +493,7 @@ class GradeInferenceService:
                 flip_front, flip_back = decision.flip
                 front_crop = _rotate_crop(front_crop) if flip_front else front_crop
                 back_crop = _rotate_crop(back_crop) if flip_back else back_crop
-                front, back = (_jpeg_roundtrip(c.image) for c in (front_crop, back_crop))
+                front, back = (extractor_input(c) for c in (front_crop, back_crop))
                 with self._lock:
                     feats = self._extractor(front, back)
         out = self._head(feats)
@@ -483,6 +510,7 @@ class GradeInferenceService:
             notes=notes,
             swapped=decision is not None and decision.swap,
             same_side=None if decision is None else decision.same_side,
+            guard_decision=decision,
         )
 
 

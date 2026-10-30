@@ -1,14 +1,31 @@
 """Train the face side / orientation guard (`backend/app/ml/face_guard.py`).
 
-    python -m ml.training.train_face_guard
+    python -m ml.training.train_face_guard                     # served-path features
+    python -m ml.training.train_face_guard --features precrop  # the 2026-10-28 source
 
 Steps:
-1. The rows `train_probe` uses (`load_rows`) and their upright region features,
-   read from the `train_probe` cache (data/models/cache/region_feats.npz, never
-   rewritten here).
-2. Features of every crop rotated 180 degrees (`np.rot90(rgb, 2)` of the stored
-   precrop), cached in data/models/cache/region_feats_rot180.npz with the same
-   keying and invalidation as the main cache (`train_probe.extract_features`).
+1. The rows `train_probe` uses (`load_rows`) and one face's features per row,
+   upright and rotated 180 degrees, from one of two sources (`--features`):
+   - `served` (default): the original DB photos (`front_path` / `back_path`, the
+     ones `ml.eval.evaluate` feeds the service) through the probe path's own
+     preprocessing, `inference.served_extractor_input`: decode, EXIF transpose,
+     1024 px cap, detection, `_jpeg_roundtrip`. The rotated face is the photo
+     rotated before all that, with `evaluate.perturb_image("rotate_180", ...)`
+     (cv2 decode, rotate, JPEG q95), exactly as the harness's `rotate_180`.
+     Cached in data/models/cache/region_feats_served.npz and
+     region_feats_served_rot180.npz. The two precrop caches are only read, for
+     `transfer_from_precrop` (step 2), and never written.
+   - `precrop`: the precrops as stored (the `train_probe` cache
+     data/models/cache/region_feats.npz, read only) and the precrops rotated with
+     `np.rot90(rgb, 2)` (data/models/cache/region_feats_rot180.npz).
+   Every cache is keyed and invalidated like the main one
+   (`train_probe.extract_features`: source file size + mtime, feature spec,
+   variant). A served cache isn't invalidated by a change to the preprocessing
+   code: delete it after changing `preprocess.py` or `inference.extractor_input`.
+2. With `served`, `transfer_from_precrop`: probes fit on precrop features of the
+   training folds, scored on the held-out certs' served features (same folds),
+   at the thresholds precrop CV chooses, i.e. how the precrop-trained guard does
+   on served faces out of fold.
 3. Three logistic probes over one face's CLS + mean features: `side` (P(back),
    both orientations), `front_upright` and `back_upright` (P(flipped)). Each is
    sklearn `LogisticRegression` on standardised features, the scaler folded into
@@ -19,7 +36,9 @@ Steps:
    out-of-fold clean-face FPR is <= FPR_LIMIT. A check that misses its gate is
    disabled, with the reason in the sidecar.
 5. Fit on train+val, report once on test, and write data/models/face_guard.npz
-   (+ .json) and test-artifacts/eval/face_guard_report.json.
+   (+ .json, recording `feature_source`) and
+   test-artifacts/eval/face_guard_report.json. `--no-save` writes only the
+   report (and the feature caches).
 
 The test split is never used to choose anything. Restart the API afterwards.
 """
@@ -41,7 +60,9 @@ from sklearn.preprocessing import StandardScaler
 
 from backend.app.core.config import PROJECT_ROOT, get_settings
 from backend.app.ml.face_guard import CHECKS, FaceGuard, LogisticProbe, guard_input
-from backend.app.ml.features import FEATURE_SPEC, feature_spec_hash
+from backend.app.ml.features import FEATURE_SPEC, build_region_model, feature_spec_hash
+from backend.app.ml.inference import served_extractor_input
+from ml.eval.evaluate import perturb_image
 from ml.training.probe import card_groups
 from ml.training.train_probe import _git_commit, extract_features, load_rows
 
@@ -61,9 +82,65 @@ GATES = {
 C = 1.0
 SEED = 0
 
+FEATURE_SOURCES = ("served", "precrop")
+# Per source: the (upright, rotated) cache files in data/models/cache, with their variants.
+CACHES = {
+    "precrop": (("region_feats.npz", ""), ("region_feats_rot180.npz", "rot180")),
+    "served": (("region_feats_served.npz", "served"), ("region_feats_served_rot180.npz", "served_rot180")),
+}
+FEATURE_SOURCE_NOTES = {
+    "precrop": "stored precrops (upright) and np.rot90(precrop, 2) (rotated)",
+    "served": (
+        "original DB photos through inference.served_extractor_input (decode, EXIF transpose, "
+        "1024 px cap, detection, _jpeg_roundtrip); rotated: the photo rotated first with "
+        "ml.eval.evaluate.perturb_image('rotate_180') (cv2 decode, rotate 180, JPEG q95)"
+    ),
+}
+SERVED_PATHS = ("front_path", "back_path")
+
 
 def rot180(rgb: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(np.rot90(rgb, 2))
+
+
+def served_upright(path: Path) -> np.ndarray:
+    """The extractor input `/api/grade` makes of the photo at `path`."""
+    return served_extractor_input(path.read_bytes())
+
+
+def served_rot180(path: Path) -> np.ndarray:
+    """The same for the photo rotated 180 degrees as `ml.eval.evaluate`'s `rotate_180` does."""
+    return served_extractor_input(perturb_image("rotate_180", path.read_bytes()))
+
+
+def load_face_features(
+    source: str,
+    rows,
+    data_dir: Path,
+    cache_dir: Path,
+    *,
+    model_factory=None,
+    workers: int = 1,
+) -> tuple[np.ndarray, np.ndarray]:
+    """(upright, rotated) (N, 2, n_regions, D) features of `rows` from `source`.
+
+    `served` writes only its own two caches. `precrop` reads the `train_probe`
+    cache without writing it and keeps region_feats_rot180.npz up to date, as
+    the 2026-10-28 training did. `model_factory` defaults to `build_region_model`.
+    """
+    if source not in FEATURE_SOURCES:
+        raise ValueError(f"unknown feature source {source!r}; known: {', '.join(FEATURE_SOURCES)}")
+    if source == "precrop":
+        return precrop_features(rows, data_dir, cache_dir, save_rot=True, model_factory=model_factory)
+    (up_name, up_variant), (rot_name, rot_variant) = CACHES["served"]
+    model_factory = model_factory or build_region_model
+    missing = [r["cert_number"] for r in rows if not all(r[k] for k in SERVED_PATHS)]
+    if missing:
+        raise ValueError(f"{len(missing)} certs have no original photo path, e.g. {missing[:3]}")
+    kw = {"model_factory": model_factory, "path_keys": SERVED_PATHS, "workers": workers}
+    up = extract_features(rows, data_dir, cache_dir / up_name, load=served_upright, variant=up_variant, **kw)
+    rot = extract_features(rows, data_dir, cache_dir / rot_name, load=served_rot180, variant=rot_variant, **kw)
+    return up, rot
 
 
 # --------------------------------------------------------------------------- #
@@ -110,12 +187,25 @@ def fit_logistic(x: np.ndarray, y: np.ndarray, c: float = C) -> LogisticProbe:
     return LogisticProbe(weight=coef.astype(np.float64), bias=bias)
 
 
-def oof_probs(x: np.ndarray, y: np.ndarray, groups: np.ndarray, n_folds: int, seed: int = SEED):
-    """Out-of-fold P(positive) from card-grouped stratified K-fold."""
+def oof_probs(
+    x: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+    n_folds: int,
+    seed: int = SEED,
+    x_eval: np.ndarray | None = None,
+):
+    """Out-of-fold P(positive) from card-grouped stratified K-fold.
+
+    Each fold's probe is fit on `x` of the other folds and scores the held-out
+    rows of `x_eval` (default `x`). The folds depend only on y, groups and seed,
+    so two feature sources of the same faces share them.
+    """
+    x_eval = x if x_eval is None else x_eval
     p = np.full(len(y), np.nan)
     skf = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=seed)
     for tr, te in skf.split(np.zeros(len(y)), y, groups):
-        p[te] = fit_logistic(x[tr], y[tr]).prob(x[te])
+        p[te] = fit_logistic(x[tr], y[tr]).prob(x_eval[te])
     return p
 
 
@@ -209,6 +299,54 @@ def _rounded(obj):
     return obj
 
 
+def transfer_metrics(
+    src_up: np.ndarray,
+    src_rot: np.ndarray,
+    dst_up: np.ndarray,
+    dst_rot: np.ndarray,
+    groups: np.ndarray,
+    cv_folds: int = 5,
+) -> dict:
+    """Probes trained on the source features, scored out of fold on the destination's.
+
+    Per check: the source's own OOF metrics and the threshold training on it
+    chooses, and the destination's OOF metrics with its clean-face FPR at that
+    threshold. Both sources must hold the same faces in the same order; pass
+    train+val rows only.
+    """
+    if not (src_up.shape == src_rot.shape == dst_up.shape == dst_rot.shape and len(groups) == len(src_up)):
+        raise ValueError("transfer_metrics: the two sources are not the same faces")
+    src, dst = face_sets(src_up, src_rot, groups), face_sets(dst_up, dst_rot, groups)
+    out = {}
+    for name in CHECKS:
+        s, d = src[name], dst[name]
+        ps = oof_probs(s["X"], s["y"], s["groups"], cv_folds)
+        pd = oof_probs(s["X"], s["y"], s["groups"], cv_folds, x_eval=d["X"])
+        ms, md = probe_metrics(name, ps, s["y"], s["clean"]), probe_metrics(name, pd, d["y"], d["clean"])
+        t = choose_threshold(ms)
+        at = md["at_threshold"][str(t if t is not None else THRESHOLD_GRID[-1])]
+        entry = {
+            "source_threshold": t,
+            "source_cv": ms,
+            "dest_cv": md,
+            "dest_clean_fpr_at_source_threshold": at["clean_fpr"],
+            "dest_n_clean_fp_at_source_threshold": at["n_clean_fp"],
+        }
+        if name == "side":
+            n = len(src_up)
+            entry["dest_pairs"] = pair_side_metrics(pd[:n], pd[2 * n : 3 * n], t or THRESHOLD_GRID[-1])
+        out[name] = entry
+        log.info(
+            "%s transfer: dest clean FPR %.3f%% (%d of %d) at source threshold %s",
+            name,
+            100 * at["clean_fpr"],
+            at["n_clean_fp"],
+            md["n_clean"],
+            t,
+        )
+    return out
+
+
 def train_guard(
     up: np.ndarray,
     rot: np.ndarray,
@@ -216,11 +354,13 @@ def train_guard(
     fit_mask: np.ndarray,
     test_mask: np.ndarray,
     cv_folds: int = 5,
+    feature_source: str = "precrop",
 ) -> tuple[FaceGuard, dict]:
     """Fit the three probes; thresholds and gates from CV on `fit_mask` only.
 
-    Returns the guard (metadata filled in) and the report. Test rows only get
-    scored by the final probes.
+    Returns the guard (metadata filled in, incl. `feature_source`: which
+    features `up` / `rot` are) and the report. Test rows only get scored by the
+    final probes.
     """
     fit_sets = face_sets(up[fit_mask], rot[fit_mask], groups[fit_mask])
     test_sets = face_sets(up[test_mask], rot[test_mask], groups[test_mask]) if test_mask.any() else None
@@ -271,6 +411,8 @@ def train_guard(
     metadata = {
         "kind": "face_guard",
         "inputs": "cls + mean region features of one face (GLOBAL_SLICE)",
+        "feature_source": feature_source,
+        "feature_source_note": FEATURE_SOURCE_NOTES.get(feature_source, ""),
         "feature_spec_hash": feature_spec_hash(),
         "feature_spec": FEATURE_SPEC,
         "disabled_reasons": reasons,
@@ -298,21 +440,21 @@ def train_guard(
 def main(
     cv_folds: int = typer.Option(5, help="Card-grouped CV folds over train+val."),
     out: Path | None = typer.Option(None, help="Guard path (default data/models/face_guard.npz)."),
+    features: str = typer.Option(
+        "served", help="Feature source: served (the /api/grade preprocessing of the DB photos) or precrop."
+    ),
+    save: bool = typer.Option(True, help="Write the guard; --no-save writes only the report and caches."),
+    report: Path = typer.Option(REPORT_PATH, help="Where to write the JSON report."),
+    workers: int = typer.Option(8, help="Threads preprocessing photos for served-path extraction."),
 ) -> None:
+    if features not in FEATURE_SOURCES:
+        raise typer.BadParameter(f"{features!r}; known: {', '.join(FEATURE_SOURCES)}", param_hint="--features")
     settings = get_settings()
     rows = load_rows(settings.db_path)
     if not rows:
         raise SystemExit("no certs with usable precrops - run `python -m ml.data.precrop`")
     cache_dir = settings.models_dir / "cache"
-    # Upright features: read the train_probe cache, never write it.
-    up = extract_features(rows, settings.data_dir, cache_dir / "region_feats.npz", save=False)
-    rot = extract_features(
-        rows,
-        settings.data_dir,
-        cache_dir / "region_feats_rot180.npz",
-        transform=rot180,
-        variant="rot180",
-    )
+    up, rot = load_face_features(features, rows, settings.data_dir, cache_dir, workers=workers)
     split = np.array([r["split"] for r in rows])
     groups = card_groups(
         [r["brand_title"] or "" for r in rows],
@@ -323,16 +465,50 @@ def main(
     test_mask = split == "test"
     log.info("certs: fit (train+val)=%d test=%d", fit_mask.sum(), test_mask.sum())
 
-    guard, report = train_guard(up, rot, groups, fit_mask, test_mask, cv_folds)
+    transfer = None
+    if features == "served":
+        # How the precrop-trained guard does on served faces, out of fold. The
+        # precrop caches are read only (save=False).
+        pre_up, pre_rot = precrop_features(rows, settings.data_dir, cache_dir, save_rot=False)
+        transfer = transfer_metrics(
+            pre_up[fit_mask], pre_rot[fit_mask], up[fit_mask], rot[fit_mask], groups[fit_mask], cv_folds
+        )
+
+    guard, result = train_guard(up, rot, groups, fit_mask, test_mask, cv_folds, feature_source=features)
     guard.metadata["trained_at"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     guard.metadata["git_commit"] = _git_commit()
-    path = out or settings.models_dir / "face_guard.npz"
-    guard.save(path)
-    log.info("wrote %s (enabled: %s)", path, ", ".join(guard.enabled) or "none")
+    guard.metadata["feature_caches"] = [name for name, _ in CACHES[features]]
+    if save:
+        path = out or settings.models_dir / "face_guard.npz"
+        guard.save(path)
+        log.info("wrote %s (enabled: %s)", path, ", ".join(guard.enabled) or "none")
+    else:
+        log.info("--no-save: no guard written (it would enable: %s)", ", ".join(guard.enabled) or "none")
 
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text(json.dumps({**report, **guard.metadata, "enabled_checks": list(guard.enabled)}, indent=2))
-    log.info("report -> %s", REPORT_PATH)
+    full = {**result, **guard.metadata, "enabled_checks": list(guard.enabled), "saved": save}
+    if transfer is not None:
+        full["transfer_from_precrop"] = _rounded(transfer)
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(json.dumps(full, indent=2))
+    log.info("report -> %s", report)
+
+
+def precrop_features(rows, data_dir: Path, cache_dir: Path, *, save_rot: bool, model_factory=None):
+    """(upright, rotated) precrop features. region_feats.npz is only read; the
+    rotated cache is written only with `save_rot`."""
+    (up_name, _), (rot_name, rot_variant) = CACHES["precrop"]
+    model_factory = model_factory or build_region_model
+    up = extract_features(rows, data_dir, cache_dir / up_name, model_factory=model_factory, save=False)
+    rot = extract_features(
+        rows,
+        data_dir,
+        cache_dir / rot_name,
+        model_factory=model_factory,
+        transform=rot180,
+        variant=rot_variant,
+        save=save_rot,
+    )
+    return up, rot
 
 
 if __name__ == "__main__":

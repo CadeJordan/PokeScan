@@ -447,3 +447,43 @@ def test_cli_perturbations_option(monkeypatch):
     seen.clear()
     runner.invoke(ev.app, [])
     assert seen["perturbations"] is None  # all, as before
+
+
+# --------------------------------------------------------------------------- #
+# Face guard probabilities per cert
+# --------------------------------------------------------------------------- #
+class _GuardService(_FakeService):
+    """Sample 0 gets a guard decision that rotated its front; sample 1 has no guard."""
+
+    def predict(self, front: bytes, back: bytes):
+        from backend.app.ml.face_guard import GuardDecision
+
+        p = _FakePrediction(10, True)
+        p.notes = []
+        p.guard_decision = None
+        if front.startswith(b"0"):
+            p.notes = ["front photo was upside down; rotated it"]
+            p.guard_decision = GuardDecision(False, (True, False), p.notes, (0.01, 0.98), (0.995, 0.2))
+        return p
+
+
+def test_report_and_robustness_carry_guard_probabilities(tmp_path):
+    import ml.eval.evaluate as ev
+
+    samples = []
+    for i in range(2):
+        f = tmp_path / f"{i}.jpg"
+        f.write_bytes(f"{i}".encode())
+        samples.append(ev.Sample(str(i), 10, f, f, "card"))
+    service = _GuardService()
+    rows = ev.predict_all(service, samples, progress=False)
+    assert rows["p_flip"].shape == (2, 2) and np.isnan(rows["p_flip"][1]).all()
+    report = ev.build_report(rows, n_boot=0)
+    first, second = report["predictions"]
+    assert first["p_back"] == [0.01, 0.98] and first["p_flip"] == [0.995, 0.2]
+    assert first["notes"] == "front photo was upside down; rotated it"
+    assert "p_back" not in second and "p_flip" not in second
+    # Each sample's front and back are one file, so swap_faces keeps the bytes.
+    out = ev.robustness(service, samples, rows, ["swap_faces"])["swap_faces"]
+    assert out["guard"] == [{"p_back": [0.01, 0.98], "p_flip": [0.995, 0.2]}, {}]
+    assert out["notes"] == ["front photo was upside down; rotated it", ""]
