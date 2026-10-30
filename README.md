@@ -330,7 +330,11 @@ are enabled. Retrain it whenever the feature spec changes. What it does to a req
   and one of the back`. `ml.eval` still grades such pairs, keeping the note
   `both photos look like card backs`, and counts them in `n_would_reject`.
 - `front photo was upside down; rotated it` (or `back`) (note): that face was turned
-  180° and its features re-extracted (about 1.4 s more on CPU).
+  180° and its features re-extracted (about 1.4 s more on CPU). A face with no card
+  outline is never rotated: it is graded on the padded whole photo, which the upright
+  probes never trained on (every false rotation measured on 2026-10-29 was such a
+  face). `/api/grade` refuses those uploads with 422 anyway; `ml.eval` still reports
+  their P(flipped).
 
 Restart the API afterwards. The rest of this section is the legacy end-to-end
 CNN, which the API serves only with `ALLOW_LEGACY_MODEL=1` (or through

@@ -341,7 +341,7 @@ def test_guard_decision_error_still_returns_200(probe_files, serve_env, pair, mo
     _save_guard(head_path)
     svc = _ready_service(head_path, feat_path)
     assert svc._guard is not None
-    def decide(self, feats):
+    def decide(self, feats, found_quad=(True, True)):
         raise FloatingPointError("boom")
 
     monkeypatch.setattr(FaceGuard, "decide", decide)

@@ -23,7 +23,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from backend.app.ml.face_guard import NOTE_BOTH, NOTE_FLIPPED, NOTE_SWAPPED
+from backend.app.ml.face_guard import NOTE_BOTH, NOTE_SWAPPED
 from backend.app.ml.inference import GradeInferenceService, GradePrediction
 from backend.app.ml.preprocess import ImageDecodeError, decode_image, detect_and_crop
 from backend.tests.test_face_guard import THRESHOLDS, _feats, _guard, _logit, _service
@@ -285,12 +285,14 @@ def test_swap_with_both_faces_missing_names_both(tmp_path, blank, monkeypatch):
 
 
 def test_swap_then_flip_still_names_the_uploaded_face(tmp_path, pair, blank):
-    # Uploaded back has no card; the guard swaps, then rotates the graded front
-    # (the uploaded back). The rotated crop keeps found_quad=False.
+    # Uploaded back has no card; the guard swaps it into the front slot. It reads
+    # as flipped but has no card, so it isn't rotated (guard-skip-orientation-
+    # without-card; this test used to pin the rotation).
     feats = _feats(side=(10.0, -10.0), flip=(-10.0, 10.0))  # after swap: front row flipped
     svc = _service(tmp_path, _guard(), feats, _feats(tag=2.0))
     pred = svc.predict(pair[0], blank)
-    assert pred.swapped and pred.notes == [NOTE_SWAPPED, NOTE_FLIPPED.format("front")]
+    assert pred.swapped and pred.notes == [NOTE_SWAPPED]
+    assert pred.guard_decision.no_card == (True, False)
     assert (pred.found_quad_front, pred.found_quad_back) == (False, True)
     assert pred.rejection() == ("card_not_found", f"back: {CARD_NOT_FOUND}")
 
@@ -298,7 +300,7 @@ def test_swap_then_flip_still_names_the_uploaded_face(tmp_path, pair, blank):
 def test_guard_error_with_a_fallback_face_is_still_card_not_found(tmp_path, pair, blank, monkeypatch):
     from backend.app.ml.face_guard import FaceGuard
 
-    def decide(self, feats):
+    def decide(self, feats, found_quad=(True, True)):
         raise FloatingPointError("boom")
 
     monkeypatch.setattr(FaceGuard, "decide", decide)

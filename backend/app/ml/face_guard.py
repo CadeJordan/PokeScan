@@ -71,6 +71,10 @@ class GuardDecision:
     p_back: tuple[float, float] | None = None   # P(back) per uploaded row, if checked
     p_flip: tuple[float, float] | None = None   # P(flipped) per face after the swap
     same_side: str | None = None   # "front" / "back": both rows read as that side
+    # (front, back) after the swap: orientation check enabled but not applied
+    # because the face has no card outline (a padded whole photo the upright
+    # probes never trained on). P(flipped) is still in p_flip.
+    no_card: tuple[bool, bool] = (False, False)
 
 
 @dataclass(slots=True)
@@ -138,21 +142,34 @@ class FaceGuard:
         return False, [], p_back
 
     def check_orientation(
-        self, feats: np.ndarray
-    ) -> tuple[tuple[bool, bool], list[str], tuple[float, float] | None]:
-        """((flip front?, flip back?), notes, P(flipped) per face) for [front, back] rows."""
+        self, feats: np.ndarray, found_quad: tuple[bool, bool] = (True, True)
+    ) -> tuple[tuple[bool, bool], list[str], tuple[float, float] | None, tuple[bool, bool]]:
+        """((flip front?, flip back?), notes, P(flipped) per face, no-card skips) for [front, back] rows.
+
+        A face with no card outline (`found_quad` False) is never flipped.
+        """
         checks = ("front_upright", "back_upright")
         if not any(c in self.enabled for c in checks):
-            return (False, False), [], None
+            return (False, False), [], None, (False, False)
         p = self.p_flip(feats)
+        checked = tuple(c in self.enabled for c in checks)
+        no_card = tuple(bool(c and not q) for c, q in zip(checked, found_quad, strict=True))
         flip = tuple(
-            bool(c in self.enabled and p[i] > self.thresholds[c]) for i, c in enumerate(checks)
+            bool(checked[i] and not no_card[i] and p[i] > self.thresholds[c])
+            for i, c in enumerate(checks)
         )
         notes = [NOTE_FLIPPED.format(face) for face, f in zip(FACES, flip, strict=True) if f]
-        return flip, notes, (float(p[0]), float(p[1]))
+        return flip, notes, (float(p[0]), float(p[1])), no_card
 
-    def decide(self, feats: np.ndarray) -> GuardDecision:
+    def decide(
+        self, feats: np.ndarray, found_quad: tuple[bool, bool] = (True, True)
+    ) -> GuardDecision:
         """Side check, then the orientation check on the (possibly swapped) rows.
+
+        `found_quad` is per uploaded row, like `feats`; it follows the swap. A face
+        with no card outline is graded on the padded whole photo, which the upright
+        probes never trained on (all false rotations measured on 2026-10-29 were
+        such faces), so it is never rotated.
 
         When both rows read as the same side (a "both photos look like" note), the
         orientation check is skipped: it isn't known which upright probe applies to
@@ -165,8 +182,9 @@ class FaceGuard:
             side = "back" if p_back[0] > 0.5 else "front"
             return GuardDecision(False, (False, False), notes, p_back, None, side)
         rows = feats[::-1] if swap else feats
-        flip, flip_notes, p_flip = self.check_orientation(rows)
-        return GuardDecision(swap, flip, notes + flip_notes, p_back, p_flip)
+        quads = (found_quad[1], found_quad[0]) if swap else tuple(found_quad)
+        flip, flip_notes, p_flip, no_card = self.check_orientation(rows, quads)
+        return GuardDecision(swap, flip, notes + flip_notes, p_back, p_flip, no_card=no_card)
 
     # ------------------------------------------------------------------ io
     def save(self, path: Path) -> None:

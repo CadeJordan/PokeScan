@@ -174,7 +174,7 @@ def test_any_exception_from_decide_grades_unguarded(tmp_path, pair, monkeypatch,
     feats = _feats(side=(10.0, -10.0))
     svc = _service(tmp_path, _guard(), feats)
 
-    def decide(self, f):
+    def decide(self, f, found_quad=(True, True)):
         raise exc
 
     monkeypatch.setattr(FaceGuard, "decide", decide)
