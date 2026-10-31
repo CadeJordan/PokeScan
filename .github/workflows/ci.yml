@@ -70,6 +70,10 @@ jobs:
       - name: ESLint
         run: npm run lint
 
+      # Node's built-in runner with type stripping: plain-TS modules only, no test dependency
+      - name: Unit tests
+        run: npm test
+
       - name: Typecheck
         run: npx tsc --noEmit
 
