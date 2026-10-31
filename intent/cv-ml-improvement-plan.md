@@ -14,6 +14,16 @@ Small fixes found in the review are in `intent/smallfix.md` §10.
 ## How the system performs now
 
 > 2026-10-27: superseded for test numbers. The test split was re-assigned by card (item 9, [[stable-grouped-split]] phase 2), so the test rows below describe the old per-cert split, and the CV rows the old fit set. Current numbers: `docs/adr/0002-card-grouped-test-split.md`.
+>
+> 2026-10-31: current baseline after [[cv-fold-stratification]] (CV folds stratified on ≤7 / 8 / 9 / 10; head retrained 2026-10-31T21:21:45Z, 2,241 fit certs, card-grouped test split). The 2026-10-23 table below is kept as history.
+>
+> | | n | MAE | exact | QWK | ECE | AUC ≤8 vs ≥9 | AUC 10 vs 9 |
+> |---|---|---|---|---|---|---|---|
+> | Card-grouped 5-fold CV (train+val), seed 0 | 2241 | 0.468 | 64.1% | 0.577 | 0.031 | 0.851 | 0.724 |
+> | Card-grouped 5-fold CV, mean ± SD over seeds 0–4 | 2241 | 0.464 ± 0.006 | 64.3% | 0.579 ± 0.002 | 0.038 | 0.855 | 0.725 ± 0.006 |
+> | Test, precrop features (all unseen cards) | 370 | 0.438 | 66.5% | 0.499 | 0.052 | 0.829 | 0.782 |
+> | Test, live pipeline (`ml.eval.evaluate`, `test-artifacts/eval/cv_folds`) | 375 | 0.435 | 66.7% | 0.506 | 0.049 | 0.832 | 0.778 |
+> | Always 10, test (live) | 375 | 0.656 | 56.8% | 0 | | | |
 
 Probe model (`data/models/grade_head.json`, trained 2026-10-23, commit `77a34ea`, 2,223 fit certs, all PSA):
 
