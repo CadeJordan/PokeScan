@@ -12,8 +12,8 @@ const Home = () => {
 				</h1>
 				<p className="max-w-xl text-balance text-[15px] leading-relaxed text-zinc-400">
 					Upload a photo of the front and back of your Pokemon card. The model
-					scores it on centering, corners, edges and surface, and returns a
-					predicted grade with a calibrated confidence.
+					reads its corners, edges and surface and returns a predicted grade with
+					its confidence; centering is measured separately.
 				</p>
 			</section>
 
@@ -28,17 +28,17 @@ const Home = () => {
 					<HowCard
 						step="01"
 						title="Detect & dewarp"
-						body="A classical edge / contour detector locates the card outline and warps it to a 600 × 840 canonical canvas. Slabs are handled."
+						body="Finds the card outline (slabs too), corrects the perspective and warps it to 600 × 840. No outline, no grade: you're asked to retake the photo."
 					/>
 					<HowCard
 						step="02"
-						title="Score with ConvNeXt"
-						body="Front and back are processed by a shared-weight ConvNeXt-Tiny backbone with a CORN ordinal head. Centering is measured separately by classical CV."
+						title="Read the regions"
+						body="A frozen DINOv2 vision model describes 11 regions per face: corners, edges, centre and the whole card. Four small probes trained on PSA-graded cards turn the regions into grade signals."
 					/>
 					<HowCard
 						step="03"
-						title="Calibrate"
-						body="Logits pass through a temperature scalar fit on held-out PSA data, so the reported confidence reflects empirical accuracy."
+						title="Check and combine"
+						body="A guard checks the front is a front, the back a back, and the front is the right way up. A final probe combines the region signals into the grade distribution. Centering is measured separately from the borders."
 					/>
 				</div>
 			</section>
@@ -55,11 +55,11 @@ const Home = () => {
 					/>
 					<TipRow
 						label="Framing"
-						body="Fill the frame with the card; cropping is automatic."
+						body="Show the whole card with a little background around it; cropping is automatic."
 					/>
 					<TipRow
 						label="Both sides"
-						body="Front and back are required. Back contributes ~30% of the grade."
+						body="Front and back are both required; the model reads both."
 					/>
 					<TipRow
 						label="Limitations"

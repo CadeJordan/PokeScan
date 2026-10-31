@@ -113,3 +113,9 @@ From the re-test of [[probe-artifact-consistency]]; none is a bug, all fail in t
   - Done 2026-10-27. Behaviour kept (the `OSError` propagates, so it fails closed for every head, named in `probe_load_error`); the docstring and the Load check bullets of [[probe-artifact-consistency]] now say so. Tests: `backend/tests/test_retest_a92911c.py::test_unreadable_sidecar_os_error_fails_closed_for_every_head` (a directory at the sidecar path; with and without a head hash) and `::test_sidecar_read_os_error_fails_closed_for_no_hash_head` (a plain `OSError` from the read).
 
 Owner decision (2026-10-27), in this round's PR: write the graph and sidecar to temp names and rename (an export that fails before writing anything must leave the old, consistent pair loadable); a falsy head hash is an error (fail closed); an OS-level sidecar read error fails closed, and the spec says so.
+
+## Result card follow-ups ([[result-copy-matches-probe-model]] re-test, 2026-10-30)
+
+- [ ] `frontend/src/components/GradeResult.tsx`: the distribution chart highlights the bar ">grade_int−1" (`isPick`: `i + 2 === grade_int`), which is P(grade ≥ grade_int), shown right under the confidence caption "probability of this exact grade". The two only agree for a 10. Either show per-grade probabilities (differences of `rank_probs`) with the predicted grade highlighted, or relabel. The heading "Distribution over grades" names a cumulative chart.
+- [ ] Backend region hints "clean / slight wear / wear / heavy wear" (`backend/app/api/grade.py` `_REGION_HINTS`) read as physical wear, but they are thresholds on a region's soft overall-grade signal. Needs an owner call: they are part of the API response.
+- [ ] At 320 px, "generated · <date>" wraps into "PREDICTION" in the result header strip.

@@ -27,7 +27,7 @@ const Navbar = () => {
       textColor = "text-zinc-300";
       pulse = true;
     } else {
-      statusLabel = "warming up";
+      statusLabel = "model unavailable";
       dotColor = "bg-amber-400";
       textColor = "text-zinc-400";
     }
