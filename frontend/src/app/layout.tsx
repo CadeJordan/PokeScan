@@ -16,7 +16,7 @@ const inter = localFont({
 export const metadata: Metadata = {
 	title: "PokeScan — predict your PSA grade",
 	description:
-		"Upload a photo of your Pokemon card and get a predicted PSA grade plus a calibrated confidence score.",
+		"Upload a photo of your Pokemon card and get a predicted PSA grade with its confidence.",
 };
 
 export default function RootLayout({

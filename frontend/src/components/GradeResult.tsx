@@ -61,7 +61,7 @@ const GradeResult = ({ result }: Props) => {
             </div>
             <ConfidenceBar value={confidence} />
             <p className="font-mono text-[11px] text-zinc-500">
-              temperature-calibrated on validation
+              probability of this exact grade
             </p>
           </div>
         </Cell>
@@ -71,8 +71,11 @@ const GradeResult = ({ result }: Props) => {
       <div className="border-t border-white/[0.08]">
         <div className="border-b border-white/[0.08] px-5 py-2">
           <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-500">
-            Sub-grades
+            Region read-outs
           </span>
+          <p className="mt-1 text-[12px] text-zinc-500">
+            What each region suggests about the overall grade. Not PSA sub-grades.
+          </p>
         </div>
         <div className="grid grid-cols-2 divide-x divide-y divide-white/[0.08] sm:grid-cols-4 sm:divide-y-0">
           <SubGradeCell
@@ -147,7 +150,7 @@ const GradeResult = ({ result }: Props) => {
             })}
           </ol>
           <p className="mt-3 font-mono text-[11px] text-zinc-600">
-            P(grade &gt; N) — cumulative output of the CORN ordinal head
+            P(grade &gt; N) — cumulative output of the ordinal grade head
           </p>
         </div>
       </details>
