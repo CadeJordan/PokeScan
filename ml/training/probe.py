@@ -101,9 +101,10 @@ def card_groups(brand: list[str], subject: list[str], number: list[str]) -> np.n
 
 
 def _folds(y: np.ndarray, groups: np.ndarray, n: int, seed: int):
-    # Stratify on grade with <=8 pooled: the low grades are too rare to spread.
+    # Stratify on grade with <=7 pooled (strata <=7, 8, 9, 10): balances 9 vs 10,
+    # the split the model is weakest at, and keeps 8s and the rare low grades even.
     skf = StratifiedGroupKFold(n_splits=n, shuffle=True, random_state=seed)
-    return list(skf.split(np.zeros(len(y)), np.minimum(y, 8), groups))
+    return list(skf.split(np.zeros(len(y)), np.maximum(y, 7), groups))
 
 
 def fit_region_probes(feats: np.ndarray, y: np.ndarray) -> dict[str, OrdinalProbe]:

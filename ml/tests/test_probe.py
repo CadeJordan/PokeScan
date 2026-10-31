@@ -94,3 +94,44 @@ def test_cv_keeps_card_groups_together(monkeypatch):
 def test_card_groups(brand, subject, number, same):
     g = card_groups(["A", brand], ["PIKACHU", subject], ["1", number])
     assert (g[0] == g[1]) is same
+
+
+def _graded_cards(seed: int, n_cards: int = 900):
+    """Card-grouped grades like train+val: ~30% 9s among 9s+10s, some 8s and <=7s, 1-4 certs a card."""
+    rng = np.random.default_rng(seed)
+    y, groups = [], []
+    for card, size in enumerate(rng.choice([1, 1, 1, 2, 2, 3, 4], n_cards)):
+        base = rng.choice([10, 9, 8, 7, 6, 5, 3], p=[0.58, 0.27, 0.08, 0.03, 0.02, 0.01, 0.01])
+        for _ in range(size):  # certs of one card mostly share its grade
+            other = rng.choice([10, 9, 8, 7, 5], p=[0.58, 0.27, 0.08, 0.04, 0.03])
+            y.append(base if rng.random() < 0.7 else other)
+            groups.append(f"card{card}")
+    return np.array(y), np.array(groups)
+
+
+@pytest.mark.parametrize("data_seed", [0, 1, 2])
+def test_folds_balance_9_vs_10_and_spread_8s_and_low_grades(data_seed):
+    """Outer CV folds and the meta probe's inner OOF folds, at the seeds their callers use."""
+    import inspect
+
+    from ml.training.probe import INNER_FOLDS, oof_region_grades
+
+    outer_seed = inspect.signature(cross_validate).parameters["seed"].default
+    inner_seed = inspect.signature(oof_region_grades).parameters["seed"].default
+    y, groups = _graded_cards(data_seed)
+
+    def share9(yy):
+        return (yy[yy >= 9] == 9).mean()
+
+    def check(yy, gg, n, seed):
+        folds = probe_mod._folds(yy, gg, n, seed)
+        assert len(folds) == n
+        for _, te in folds:
+            assert abs(share9(yy[te]) - share9(yy)) <= 0.03
+            for stratum in (yy == 8, yy <= 7):  # each fold gets its share, give or take 2
+                assert abs(stratum[te].sum() - stratum.sum() / n) <= 2
+        return folds
+
+    for tr, _ in check(y, groups, 5, outer_seed):
+        check(y[tr], groups[tr], INNER_FOLDS, inner_seed)  # inner folds inside each outer fold
+    check(y, groups, INNER_FOLDS, inner_seed)  # inner folds of the served head (all train+val)

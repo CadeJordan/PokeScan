@@ -123,4 +123,5 @@ Owner decision (2026-10-27), in this round's PR: write the graph and sidecar to 
 ## Full-resolution pilot follow-ups ([[full-resolution-pilot]], 2026-10-31)
 
 - [ ] `ml/data/image_io.py` docstring says PSA originals are "3-4 MB". Measured on 1,200 originals: mostly 1430×2400 at ~1 MB (median 1.01 MB); only the rare ~4,740 px ones are 3–4 MB.
-- [ ] `ml/training/probe.py:105` stratifies folds on `np.minimum(y, 8)`, which pools 9s and 10s into one class and keeps grades below 8 apart. The comment says "≤8 pooled", which is `np.maximum`. So CV folds aren't stratified on 9 vs 10 (on a 9/10-only set, not at all). Fixing it changes every CV number, so re-baseline after.
+- [x] `ml/training/probe.py:105` stratifies folds on `np.minimum(y, 8)`, which pools 9s and 10s into one class and keeps grades below 8 apart. The comment says "≤8 pooled", which is `np.maximum`. So CV folds aren't stratified on 9 vs 10 (on a 9/10-only set, not at all). Fixing it changes every CV number, so re-baseline after. Specced in [[cv-fold-stratification]].
+  - Done 2026-10-31: `_folds` stratifies on `np.maximum(y, 7)` (strata ≤7, 8, 9, 10), head retrained and shipped; re-baseline in [[cv-fold-stratification]] Results.
