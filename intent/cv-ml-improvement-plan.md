@@ -152,7 +152,7 @@ Ranked by impact over effort. Effort: S < ½ day, M = 1–2 days, L > 3 days.
 
 - **Problem:** the card is ~660 px tall in the stored 1024-px photo, and features are computed at 602 px (`features.py:26`). That's below the source resolution, which is itself downscaled from the 3–4 MB PSA originals at ingest (`image_io.py`, originals kept in `front_url`/`back_url`).
 - **Evidence:** 9-vs-10 AUC is 0.73–0.74 in CV and on test, 0.64 on unseen cards. ADR 0001 attributes this to photo resolution. Whether resolution would help is unmeasured.
-- **Impact:** possibly the largest accuracy lever after more low-grade data. **Effort:** L (a re-download decision, higher-resolution tiles for the corner and edge regions, re-extraction). **Dependencies:** open question 5. Not specced. The first step would be a 200-cert pilot.
+- **Impact:** possibly the largest accuracy lever after more low-grade data. **Effort:** L (a re-download decision, higher-resolution tiles for the corner and edge regions, re-extraction). **Dependencies:** open question 5. Specced and measured in [[full-resolution-pilot]] (600-cert pilot, owner decision 2026-10-31); its Results section has the go / no-go call. **Result (2026-10-31): stop.** For frozen DINOv2-B corner/edge tiles, the PSA originals gave AUC 10 vs 9 +0.017 (CI −0.010 to +0.045) over today's features, and upsampled stored photos +0.006 on all train+val. Resolution isn't the lever for this extractor.
 
 ### 13. No phone-photo evaluation set
 
@@ -176,7 +176,7 @@ Ranked by impact over effort. Effort: S < ½ day, M = 1–2 days, L > 3 days.
 | 11 | Phone-photo evaluation set (13) | improvement | high (knowledge) | M owner time | decision (Q8) |
 | 12 | Retire legacy path (11) | cleanup | low–medium | M | decision (Q3) |
 | 13 | Tighter crops for well/small (8) | improvement | low–medium | M | none yet |
-| 14 | Higher-resolution region features (12) | improvement | unknown, possibly large | L | decision (Q5) |
+| 14 | Higher-resolution region features (12) | improvement | measured: none for frozen DINOv2 tiles (pilot call: stop) | L | [[full-resolution-pilot]] |
 
 Suggested order: 1–2 and 4 in parallel (they touch different files), then 3, then 7 (which needs 1). Items 6, 8, 9 and 10 wait on answers.
 
