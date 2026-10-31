@@ -119,3 +119,8 @@ Owner decision (2026-10-27), in this round's PR: write the graph and sidecar to 
 - [ ] `frontend/src/components/GradeResult.tsx`: the distribution chart highlights the bar ">grade_int−1" (`isPick`: `i + 2 === grade_int`), which is P(grade ≥ grade_int), shown right under the confidence caption "probability of this exact grade". The two only agree for a 10. Either show per-grade probabilities (differences of `rank_probs`) with the predicted grade highlighted, or relabel. The heading "Distribution over grades" names a cumulative chart.
 - [ ] Backend region hints "clean / slight wear / wear / heavy wear" (`backend/app/api/grade.py` `_REGION_HINTS`) read as physical wear, but they are thresholds on a region's soft overall-grade signal. Needs an owner call: they are part of the API response.
 - [ ] At 320 px, "generated · <date>" wraps into "PREDICTION" in the result header strip.
+
+## Full-resolution pilot follow-ups ([[full-resolution-pilot]], 2026-10-31)
+
+- [ ] `ml/data/image_io.py` docstring says PSA originals are "3-4 MB". Measured on 1,200 originals: mostly 1430×2400 at ~1 MB (median 1.01 MB); only the rare ~4,740 px ones are 3–4 MB.
+- [ ] `ml/training/probe.py:105` stratifies folds on `np.minimum(y, 8)`, which pools 9s and 10s into one class and keeps grades below 8 apart. The comment says "≤8 pooled", which is `np.maximum`. So CV folds aren't stratified on 9 vs 10 (on a 9/10-only set, not at all). Fixing it changes every CV number, so re-baseline after.

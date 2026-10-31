@@ -12,6 +12,8 @@ graphify-out/cache/
 .env.local
 
 data/images/
+# full-resolution pilot originals + caches (intent/full-resolution-pilot)
+data/images_full/
 data/crops/
 data/models/
 data/backups/
