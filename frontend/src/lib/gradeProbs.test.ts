@@ -2,9 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { perGradeProbs } from "./gradeProbs.ts";
 
-// The API's grade_int: the median grade, 1 + the number of P(grade > k) above 0.5.
-const medianGrade = (rankProbs: number[]) =>
-  1 + rankProbs.filter((p) => p > 0.5).length;
+// The API's grade_int (grade_head.decode): the median grade, 1 + the number of
+// P(grade > k) above 0.5, except that a 10 needs P(grade > 9) above the head's
+// P(10) cut-off. medianGrade is the cut-off 0.5.
+const apiGrade = (rankProbs: number[], cutoff: number) =>
+  1 +
+  rankProbs.slice(0, 8).filter((p) => p > 0.5).length +
+  (rankProbs[8] > cutoff ? 1 : 0);
+const medianGrade = (rankProbs: number[]) => apiGrade(rankProbs, 0.5);
 
 const assertClose = (actual: number[], expected: number[]) => {
   assert.equal(actual.length, expected.length);
@@ -95,4 +100,16 @@ test("a real /api/grade response: the highlighted value is the confidence", () =
   assert.ok(Math.abs(probs[response.grade_int - 1] - response.confidence) < 0.001);
   // A close call: grade 5 is likelier than the median grade 6.
   assert.ok(probs[4] > probs[5]);
+});
+
+test("under a P(10) cut-off above 0.5 a 9 can sit next to a taller 10", () => {
+  // P(grade > 9) = 0.55: the median is 10, but a head with cut-off 0.6 calls 9.
+  const rank = [1, 1, 1, 1, 1, 1, 1, 0.9, 0.55];
+  const probs = perGradeProbs(rank);
+  assert.equal(medianGrade(rank), 10);
+  const grade = apiGrade(rank, 0.6);
+  assert.equal(grade, 9);
+  // The highlighted value is still the confidence, P(9) = 0.35, next to P(10) = 0.55.
+  assertClose(probs, [0, 0, 0, 0, 0, 0, 0, 0.1, 0.35, 0.55]);
+  assert.ok(probs[grade - 1] < probs[grade]);
 });

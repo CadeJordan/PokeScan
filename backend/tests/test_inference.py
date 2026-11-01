@@ -304,12 +304,14 @@ def _break_probe(head_path, feat_path, problem):
         head_path.write_bytes(b"not an npz")
     elif problem == "dim_mismatch":
         _save_head(head_path, 5)
+    elif problem == "bad_cutoff":
+        _save_head(head_path, 4, {"ten_cutoff": 1.5})
     else:  # feature_spec_hash mismatch
         _save_head(head_path, 4, {"feature_spec_hash": "aaaaaaaaaaaa"})
         _write_feature_sidecar(feat_path, "bbbbbbbbbbbb")
 
 
-PROBLEMS = ["corrupt_head", "dim_mismatch", "spec_mismatch"]
+PROBLEMS = ["corrupt_head", "dim_mismatch", "spec_mismatch", "bad_cutoff"]
 
 
 @pytest.mark.parametrize("problem", PROBLEMS)
@@ -410,6 +412,58 @@ def test_feature_spec_disagreement_fails_closed(
     err = svc.metadata["probe_load_error"]
     assert err.startswith("ValueError: feature_spec_hash: ")
     assert expected in err
+
+
+@pytest.mark.parametrize("value", [1.0, 0.45, -1, "0.6", None, True, float("nan"), float("inf")])
+def test_bad_ten_cutoff_fails_closed(probe_files, serve_env, value):
+    head_path, feat_path = probe_files
+    _save_head(head_path, 4, {"ten_cutoff": value})
+    svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
+    assert not svc.ready
+    assert svc.metadata["probe_load_error"].startswith("ValueError: ten_cutoff ")
+
+
+def _close_call_head(dim, metadata):
+    """Every input: P(grade > k) ~ 1 for k <= 8 and P(10) = 0.55, so the median is 10."""
+    from backend.app.ml.features import REGION_NAMES
+    from backend.app.ml.grade_head import OrdinalProbe
+
+    head = _zero_head(np.zeros((2, len(REGION_NAMES), dim)))
+    head.meta = OrdinalProbe(np.zeros(4), 0.0, np.array([-9.0] * 8 + [-np.log(0.55 / 0.45)]))
+    head.metadata = dict(metadata)
+    return head
+
+
+@pytest.mark.parametrize("cutoff, want", [(None, 10), (0.5, 10), (0.54, 10), (0.56, 9), (0.6, 9)])
+def test_served_grade_uses_the_heads_cutoff_like_metrics_and_eval(
+    probe_files, serve_env, tmp_path, jpeg, cutoff, want
+):
+    # One rule for the API, train_probe.metrics (CV and test numbers) and ml.eval.
+    from backend.app.ml.features import REGION_NAMES
+    from backend.app.ml.grade_head import decode
+    from ml.eval.evaluate import Sample, predict_all
+    from ml.training.train_probe import metrics
+
+    head_path, feat_path = probe_files
+    _close_call_head(4, {} if cutoff is None else {"ten_cutoff": cutoff}).save(head_path)
+    svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
+    assert svc.kind == "probe" and svc.ready
+    if cutoff is not None:
+        assert svc.metadata["ten_cutoff"] == cutoff  # shown by /api/health
+    svc._extractor = FakeExtractor(np.ones((2, len(REGION_NAMES), 4), np.float32))
+    pred = svc.predict(jpeg, jpeg)
+    cum = np.array(pred.rank_probs)
+    assert cum[-1] == pytest.approx(0.55) and decode(cum)[1] == 10
+    assert pred.grade_int == want
+    assert pred.grade_int == decode(cum, 0.5 if cutoff is None else cutoff)[1]
+    # The highlighted bar is the confidence, here next to a taller P(10) when it's a 9.
+    assert pred.confidence == pytest.approx(decode(cum)[3][want - 1])
+    t = 0.5 if cutoff is None else cutoff
+    assert metrics(np.array([want]), cum[None], t)["exact"] == 1.0
+    (tmp_path / "f.jpg").write_bytes(jpeg)
+    rows = predict_all(svc, [Sample("c", want, tmp_path / "f.jpg", tmp_path / "f.jpg")], progress=False)
+    assert rows["pred_int"].tolist() == [want]
+    assert rows["confidence"].tolist() == [pred.confidence]
 
 
 @pytest.mark.parametrize("missing", ["head", "features", "both"])
