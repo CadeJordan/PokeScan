@@ -10,8 +10,11 @@ Steps:
    reused only while its crop files (size + mtime) and the feature spec
    (`features.feature_spec_hash`) are unchanged.
 2. Card-grouped 5-fold CV over train+val: certs of the same printed card never
-   straddle folds, so a probe can't score by recognising the card.
-3. Final head fitted on train+val, evaluated once on the test split.
+   straddle folds, so a probe can't score by recognising the card. Run for
+   seeds 0-4 to tune the P(10) cut-off of the hard grade (`tune_ten_cutoff`);
+   seed 0 is the reported `cv_grouped`.
+3. Final head fitted on train+val, evaluated once on the test split with the
+   tuned cut-off, which is stored in its metadata (`ten_cutoff`).
 4. Writes data/models/card_features.onnx (+ .json sidecar) when it is missing
    or was exported from another feature spec, then data/models/grade_head.npz
    (+ .json metadata, returned by /api/health). The graph comes first so a
@@ -45,7 +48,7 @@ from backend.app.ml.features import (
     feature_spec_hash,
     to_input,
 )
-from backend.app.ml.grade_head import decode
+from backend.app.ml.grade_head import DEFAULT_TEN_CUTOFF, TEN_CUTOFF_KEY, decode
 from ml.eval.evaluate import expected_calibration_error, summarize
 from ml.training.probe import L2, PCA_DIM, card_groups, cross_validate, fit_grade_head
 
@@ -55,6 +58,16 @@ log = logging.getLogger("train_probe")
 app = typer.Typer(add_completion=False)
 
 REPORT_PATH = PROJECT_ROOT / "test-artifacts" / "eval" / "probe_report.json"
+
+# P(10) cut-offs tried by `tune_ten_cutoff`, over CV seeds 0-4
+# (intent/grade-decision-rule, docs/adr/0003-grade-decision-rule.md).
+CUTOFF_GRID = tuple(round(0.5 + 0.02 * i, 2) for i in range(11))
+CUTOFF_SEEDS = tuple(range(5))
+CUTOFF_CRITERION = (
+    "highest t in the grid whose mean exact accuracy over the CV seeds is at least the "
+    "median's (t 0.5) minus 0.01 and whose mean MAE is at most the median's plus the "
+    "median's seed-to-seed SD (ddof 1)"
+)
 
 
 def load_rows(db_path: Path) -> list[sqlite3.Row]:
@@ -189,8 +202,8 @@ def extract_features(
     return np.stack([cached[k] for k in keys]).astype(np.float32)
 
 
-def metrics(y: np.ndarray, cum: np.ndarray) -> dict:
-    decoded = [decode(c) for c in cum]
+def metrics(y: np.ndarray, cum: np.ndarray, ten_cutoff: float = DEFAULT_TEN_CUTOFF) -> dict:
+    decoded = [decode(c, ten_cutoff) for c in cum]
     soft = np.array([d[0] for d in decoded])
     hard = np.array([d[1] for d in decoded])
     conf = np.array([d[2] for d in decoded])
@@ -202,6 +215,37 @@ def metrics(y: np.ndarray, cum: np.ndarray) -> dict:
     if (y[top] == 10).any() and (y[top] == 9).any():
         out["auc_10_vs_9"] = float(roc_auc_score(y[top] == 10, soft[top]))
     return out
+
+
+def tune_ten_cutoff(y: np.ndarray, cums: list[np.ndarray]) -> tuple[float, dict]:
+    """P(10) cut-off from OOF cum probs of several CV seeds, by `CUTOFF_CRITERION`.
+
+    -> (cut-off, provenance for the head's metadata). Grid column 0 (0.5) is the
+    median, which always qualifies, so the cut-off is never below it.
+    """
+    exact = np.zeros((len(cums), len(CUTOFF_GRID)))
+    mae = np.zeros_like(exact)
+    for s, cum in enumerate(cums):
+        for j, t in enumerate(CUTOFF_GRID):
+            err = np.abs(np.array([decode(c, t)[1] for c in cum]) - y)
+            exact[s, j], mae[s, j] = (err == 0).mean(), err.mean()
+    mae_sd = float(mae[:, 0].std(ddof=1)) if len(cums) > 1 else 0.0
+    ok = (exact.mean(0) >= exact[:, 0].mean() - 0.01 - 1e-12) & (
+        mae.mean(0) <= mae[:, 0].mean() + mae_sd + 1e-12
+    )
+    j = int(np.flatnonzero(ok).max())
+    r = lambda v: [round(float(x), 4) for x in v]  # noqa: E731
+    return CUTOFF_GRID[j], {
+        "criterion": CUTOFF_CRITERION,
+        "n": int(len(y)),
+        "n_seeds": len(cums),
+        "median": {"exact": r(exact[:, 0]), "mae": r(mae[:, 0]), "mae_sd": round(mae_sd, 4)},
+        "chosen": {"exact": r(exact[:, j]), "mae": r(mae[:, j])},
+        "grid_mean": {
+            f"{t:.2f}": {"exact": round(float(exact[:, i].mean()), 4), "mae": round(float(mae[:, i].mean()), 4)}
+            for i, t in enumerate(CUTOFF_GRID)
+        },
+    }
 
 
 def majority_baseline(y: np.ndarray, majority: int) -> dict:
@@ -243,7 +287,9 @@ def _onnx_export_reason(onnx_path: Path, force: bool) -> str | None:
 @app.command()
 def main(
     force_onnx: bool = typer.Option(False, help="Re-export the feature ONNX even if it exists."),
-    cv_folds: int = typer.Option(5, help="Card-grouped CV folds over train+val (0 = skip CV)."),
+    cv_folds: int = typer.Option(
+        5, help="Card-grouped CV folds over train+val (0 = skip CV; the P(10) cut-off is then 0.5)."
+    ),
 ) -> None:
     settings = get_settings()
     rows = load_rows(settings.db_path)
@@ -263,25 +309,41 @@ def main(
     log.info("certs: fit (train+val)=%d test=%d", fit_mask.sum(), test_mask.sum())
 
     report: dict = {"backbone": BACKBONE, "pca_dim": PCA_DIM, "l2": L2}
+    ten_cutoff, tuning = DEFAULT_TEN_CUTOFF, None
     if cv_folds:
-        cum, _ = cross_validate(feats[fit_mask], y[fit_mask], groups[fit_mask], n_folds=cv_folds)
-        report["cv_grouped"] = _rounded(metrics(y[fit_mask], cum))
+        cums = []
+        for seed in CUTOFF_SEEDS:
+            cum, _ = cross_validate(
+                feats[fit_mask], y[fit_mask], groups[fit_mask], n_folds=cv_folds, seed=seed
+            )
+            cums.append(cum)
+            log.info("grouped CV seed %d done", seed)
+        ten_cutoff, tuning = tune_ten_cutoff(y[fit_mask], cums)
+        report[TEN_CUTOFF_KEY], report["ten_cutoff_tuning"] = ten_cutoff, tuning
+        log.info("P(10) cut-off: %.2f (%s)", ten_cutoff, tuning["chosen"])
+        # The served rule, so CV describes what the API returns. The cut-off was tuned
+        # on these predictions; ADR 0003 has the cross-fitted (honest) number.
+        report["cv_grouped"] = _rounded(metrics(y[fit_mask], cums[0], ten_cutoff))
         report["cv_majority_baseline"] = _rounded(majority_baseline(y[fit_mask], majority))
-        log.info("grouped CV: %s", report["cv_grouped"])
+        log.info("grouped CV (seed 0): %s", report["cv_grouped"])
 
     head = fit_grade_head(feats[fit_mask], y[fit_mask], groups[fit_mask])
     if test_mask.any():
         test_cum = head.meta.cum_probs(head.region_grades(feats[test_mask]))
-        report["test"] = _rounded(metrics(y[test_mask], test_cum))
+        report["test"] = _rounded(metrics(y[test_mask], test_cum, ten_cutoff))
         report["test_majority_baseline"] = _rounded(majority_baseline(y[test_mask], majority))
         # Unless the split is card-grouped (`split.py --mode grouped`), some test
         # cards also appear in train+val; report both halves.
         unseen = ~np.isin(groups[test_mask], groups[fit_mask])
         report["n_test_seen"] = int((~unseen).sum())
         if unseen.sum() >= 20:
-            report["test_unseen_cards"] = _rounded(metrics(y[test_mask][unseen], test_cum[unseen]))
+            report["test_unseen_cards"] = _rounded(
+                metrics(y[test_mask][unseen], test_cum[unseen], ten_cutoff)
+            )
         if (~unseen).sum() >= 20:
-            report["test_seen_cards"] = _rounded(metrics(y[test_mask][~unseen], test_cum[~unseen]))
+            report["test_seen_cards"] = _rounded(
+                metrics(y[test_mask][~unseen], test_cum[~unseen], ten_cutoff)
+            )
         log.info("test: %s", report["test"])
 
     head.metadata = {
@@ -293,6 +355,8 @@ def main(
         "git_commit": _git_commit(),
         "feature_spec_hash": feature_spec_hash(),
         "feature_spec": FEATURE_SPEC,
+        TEN_CUTOFF_KEY: ten_cutoff,
+        **({"ten_cutoff_tuning": tuning} if tuning else {}),
         **{
             k: v
             for k, v in report.items()

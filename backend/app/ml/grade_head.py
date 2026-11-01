@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,6 +42,10 @@ from backend.app.ml.features import (
 log = logging.getLogger(__name__)
 
 NUM_GRADES = 10
+# P(10) cut-off for the hard grade (see `decode`), stored in the head's metadata
+# by train_probe; a head without it uses the median.
+TEN_CUTOFF_KEY = "ten_cutoff"
+DEFAULT_TEN_CUTOFF = 0.5
 PROBE_NAMES = ("corners", "edges", "surface", "global")
 _SLICES = {
     "corners": CORNER_SLICE,
@@ -104,6 +109,11 @@ class GradeHead:
         if self.meta.weight.size != len(PROBE_NAMES):
             raise ValueError(f"meta probe has {self.meta.weight.size} weights, not {len(PROBE_NAMES)}")
 
+    @property
+    def ten_cutoff(self) -> float:
+        """P(10) cut-off for `decode` (ValueError if the metadata holds a bad one)."""
+        return ten_cutoff(self.metadata)
+
     def region_grades(self, feats: np.ndarray) -> np.ndarray:
         """(..., 2, n_regions, D) -> (..., len(PROBE_NAMES)) soft grades."""
         return np.stack(
@@ -152,14 +162,32 @@ class GradeHead:
         return cls(probes=probes, meta=meta, metadata=metadata)
 
 
-def decode(cum_probs: np.ndarray) -> tuple[float, int, float, np.ndarray]:
+def ten_cutoff(metadata: dict) -> float:
+    """The P(10) cut-off in a head's metadata (`TEN_CUTOFF_KEY`); 0.5 when absent.
+
+    Raises ValueError unless a present value is a finite number in [0.5, 1).
+    """
+    if TEN_CUTOFF_KEY not in metadata:
+        return DEFAULT_TEN_CUTOFF
+    t = metadata[TEN_CUTOFF_KEY]
+    if isinstance(t, bool) or not isinstance(t, int | float) or not math.isfinite(t) or not 0.5 <= t < 1:
+        raise ValueError(f"{TEN_CUTOFF_KEY} {t!r} is not a number in [0.5, 1)")
+    return float(t)
+
+
+def decode(
+    cum_probs: np.ndarray, cutoff: float = DEFAULT_TEN_CUTOFF
+) -> tuple[float, int, float, np.ndarray]:
     """Cumulative probs -> (expected grade, hard grade, confidence, per-grade probs).
 
     The hard grade is the median of the predicted distribution (1 + number of
-    thresholds with P > 0.5); confidence is the probability of that grade.
+    thresholds with P > 0.5), except at the 9/10 boundary: 10 only if
+    P(10) = P(grade > 9) > `cutoff`, otherwise the median of the rest (9 when
+    P(10) > 0.5 and the input is monotone, as the probe head's always is). The default 0.5 is the plain median. Confidence is the
+    probability of the hard grade.
     """
     p = np.asarray(cum_probs, np.float64)
     per_grade = np.clip(np.concatenate([[1.0], p]) - np.concatenate([p, [0.0]]), 0.0, None)
     per_grade /= max(per_grade.sum(), 1e-12)
-    hard = int(1 + (p > 0.5).sum())
+    hard = int(1 + (p[:-1] > 0.5).sum() + (p[-1] > cutoff))
     return float(1.0 + p.sum()), hard, float(per_grade[hard - 1]), per_grade

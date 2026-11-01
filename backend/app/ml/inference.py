@@ -181,7 +181,8 @@ class GradeInferenceService:
         settings) is the only model served.
 
         If a probe file is missing or loading fails (corrupt file, head and
-        feature model don't match), the error is kept in ``metadata`` as
+        feature model don't match, a `ten_cutoff` in the head's metadata that
+        isn't a number in [0.5, 1)), the error is kept in ``metadata`` as
         ``probe_load_error`` and the service is not ready, unless
         ``settings.allow_legacy_model`` is set: then the legacy active model is
         loaded instead. ``kind`` stays "legacy" until a probe loads; it only
@@ -207,6 +208,7 @@ class GradeInferenceService:
         self._guard = None
         self._session: ort.InferenceSession | None = None
         self._meta: dict = {}
+        self._ten_cutoff = 0.5  # the probe head's P(10) cut-off, set by _load_probe
         self._lock = Lock()
         if model_path is None:
             try:
@@ -250,6 +252,7 @@ class GradeInferenceService:
             raise FileNotFoundError(", ".join(missing))
         head = GradeHead.load(self.head_path)
         self._check_feature_spec(head.metadata)
+        self._ten_cutoff = head.ten_cutoff  # a bad cut-off fails closed, like a bad hash
         extractor = FeatureExtractor(self.features_path)
         dim = extractor.session.get_outputs()[0].shape[-1]
         if isinstance(dim, int):
@@ -499,7 +502,7 @@ class GradeInferenceService:
                 with self._lock:
                     feats = self._extractor(front, back)
         out = self._head(feats)
-        expected, hard, confidence, _ = decode(out.cum_probs)
+        expected, hard, confidence, _ = decode(out.cum_probs, self._ten_cutoff)
         return GradePrediction(
             grade=expected,
             grade_int=hard,

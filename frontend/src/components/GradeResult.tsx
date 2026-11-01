@@ -151,9 +151,8 @@ const GradeResult = ({ result }: Props) => {
             })}
           </ol>
           <p className="mt-3 font-mono text-[11px] text-zinc-600">
-            The highlighted grade is the prediction: the middle of this
-            distribution, so on a close call it can sit next to a taller
-            bar.
+            The highlighted grade is the prediction; on a close call it can
+            sit next to a taller bar.
           </p>
         </div>
       </details>
