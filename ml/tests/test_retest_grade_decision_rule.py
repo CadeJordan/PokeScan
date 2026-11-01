@@ -24,6 +24,8 @@ from ml.training import train_probe
 ROOT = Path(__file__).resolve().parents[2]
 HEAD_JSON = ROOT / "data" / "models" / "grade_head.json"
 OOF = ROOT / "test-artifacts" / "eval" / "grade_decision_rule" / "oof_seeds.npz"
+# The decision-rule head itself, backed up before tighter-slab-crops retrained it.
+DECISION_RULE_HEAD_JSON = ROOT / "data" / "backups" / "grade_head.json.pre-tighter-crops-2026-10-31"
 
 
 def test_grid_and_seeds_are_the_owners():
@@ -89,12 +91,22 @@ def test_saved_oof_predictions_reproduce_the_shipped_cutoff():
     y = z["y"].astype(int)
     cums = [z[f"cum{s}"] for s in range(5)]
     t, tuning = train_probe.tune_ten_cutoff(y, cums)
-    assert t == 0.58
+    assert t == 0.58  # the 2026-10-31 decision-rule head's OOF predictions
     if HEAD_JSON.exists():
         meta = json.loads(HEAD_JSON.read_text())
-        if "ten_cutoff_tuning" in meta and meta["n_fit"] == len(y):
+        # Compare only with a head tuned on these same predictions: a later retrain
+        # (e.g. tighter-slab-crops, t 0.56) has other OOF predictions and its own t.
+        same_oof = meta.get("ten_cutoff_tuning", {}).get("median") == tuning["median"]
+        if same_oof and meta["n_fit"] == len(y):
             assert meta[TEN_CUTOFF_KEY] == t
             assert meta["ten_cutoff_tuning"]["grid_mean"] == tuning["grid_mean"]
+    if DECISION_RULE_HEAD_JSON.exists():
+        # The head these predictions came from must still match them exactly.
+        meta = json.loads(DECISION_RULE_HEAD_JSON.read_text())
+        assert meta["ten_cutoff_tuning"]["median"] == tuning["median"]
+        assert meta["n_fit"] == len(y)
+        assert meta[TEN_CUTOFF_KEY] == t
+        assert meta["ten_cutoff_tuning"]["grid_mean"] == tuning["grid_mean"]
 
 
 # --------------------------------------------------------------------------- #

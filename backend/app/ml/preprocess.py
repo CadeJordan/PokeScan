@@ -10,13 +10,17 @@ card inside. We want just the card. Approach:
    pixels running along it and scored by how much of it is edge-supported.
 3. Take the largest well-supported, card-proportioned candidate; while it is
    a slab holder (grey gasket strip around a nested outline whose border is
-   brighter/more colourful), step inward to the card.
+   brighter/more colourful), step inward to the card. Past the first step a
+   strong outline steps into a weak one only across a flat gasket (otherwise
+   the weak one is an inner frame), and as a last step a flat gasket around
+   a textured border of the same brightness and colour (silver full-art
+   cards) counts as a holder.
 4. Apply a perspective warp to a fixed canvas.
 
-On PSA slab photos (measured with `python -m ml.eval.detection_report`) this
-lands on the card itself for ~94% of fronts and ~98% of backs; most of the
-rest are the slab well/gasket window around the card, which excludes the
-grade label.
+On PSA slab photos (measured with `precrop.crop_kind`; see
+intent/tighter-slab-crops) this lands on the card itself for ~96% of fronts
+and ~98% of backs; most of the rest are the slab well/gasket window around
+the card, which excludes the grade label.
 
 Uploads (bytes or PIL images) are first normalised like ingest
 (`ml.data.image_io`): rotated upright per their EXIF orientation and resized
@@ -173,6 +177,12 @@ _HOLDER_MAX_LUMA = 130
 _HOLDER_CONTRAST = 18
 _HOLDER_MAX_CHROMA = 30
 _HOLDER_STRIP = 0.03  # width of the strip checked outside the card, x its size
+# A gasket the same brightness and colour as the card's border (silver or grey
+# borders in a grey well) is told apart by texture instead: moulded plastic is
+# flat, the printed card is not. Luma median absolute deviations, in grey levels.
+_GASKET_MAX_MAD = 20
+_GASKET_MIN_TEXTURE = 15  # the band's MAD, so a flat ring around a flat band isn't one
+_GASKET_TEXTURE_RATIO = 2.0
 
 
 def _quad_aspect(quad: np.ndarray) -> float:
@@ -430,6 +440,8 @@ def _is_holder(
     outer: np.ndarray,
     inner: np.ndarray,
     allow_darker: bool = False,
+    allow_flat: bool = False,
+    require_flat: bool = False,
 ) -> bool:
     """True when `outer` is a slab well / holder around the card `inner`.
 
@@ -443,6 +455,15 @@ def _is_holder(
     from the slab interior, or a dark-bordered card in a grey well. It is only
     used for the first step from the outermost outline, since inside a card's
     silver rim a darker band is just dark artwork.
+
+    `allow_flat` also accepts a band no brighter or more colourful than the
+    ring when the ring is flat and the band clearly textured: a silver- or
+    grey-bordered full-art card in a grey well, whose border matches the
+    gasket in brightness and colour. `_find_card_quad` only tries it when no
+    other step applies, on strong nested outlines.
+
+    `require_flat` asks for that flat-ring, textured-band pattern on top of
+    the brightness or colour contrast: a gasket, not a card's own border.
     """
     kernel = np.ones((5, 5), np.uint8)
     inner_mask = _poly_mask(gray.shape, inner)
@@ -466,11 +487,21 @@ def _is_holder(
     band_chroma = float(np.percentile(chroma[band > 0], 75))
     if ring_luma >= _HOLDER_MAX_LUMA or ring_chroma >= _HOLDER_MAX_CHROMA:
         return False
-    return (
+    contrast = (
         band_luma > ring_luma + _HOLDER_CONTRAST
         or (allow_darker and band_luma < ring_luma - _HOLDER_CONTRAST)
         or band_chroma > ring_chroma + _HOLDER_CONTRAST
     )
+    if contrast and not require_flat:
+        return True
+    if not (allow_flat or require_flat):
+        return False
+    ring_mad = float(np.median(np.abs(gray[ring > 0].astype(np.float32) - ring_luma)))
+    band_mad = float(np.median(np.abs(gray[band > 0].astype(np.float32) - band_luma)))
+    flat = ring_mad <= _GASKET_MAX_MAD and band_mad >= max(
+        _GASKET_MIN_TEXTURE, _GASKET_TEXTURE_RATIO * ring_mad
+    )
+    return flat and (contrast or allow_flat)
 
 
 def _contains(outer: np.ndarray, inner: np.ndarray) -> bool:
@@ -541,15 +572,29 @@ def _find_card_quad(bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
         # or, when `best` itself is weak (e.g. a hull closed across the card),
         # is much better supported. Near-duplicates of `best` (other edge
         # maps) match neither: same support, and too thin a ring.
+        # Past the first step, a strong `best` is a well or the card itself,
+        # so a weak nested outline there is usually an inner frame or a
+        # partial outline in the artwork: it needs a flat gasket around it.
         inner = next(
             (
                 c for c in nested
                 if (not best[4] and c[3] >= best[3] + _BETTER_SUPPORT)
-                or _is_holder(gray, chroma, best[1], c[1], allow_darker=step == 0)
+                or _is_holder(
+                    gray, chroma, best[1], c[1], allow_darker=step == 0,
+                    require_flat=step > 0 and best[4] and not c[4],
+                )
             ),
             None,
         )
         if inner is None:
+            # Last resort: a flat gasket around a card border of the same
+            # brightness and colour. Only strong nested outlines are tried,
+            # largest first, and the search stops after this step: inside a
+            # card a flat ring is its plain border, not a holder.
+            best = next(
+                (c for c in nested if c[4] and _is_holder(gray, chroma, best[1], c[1], allow_flat=True)),
+                best,
+            )
             break
         best = inner
     return best[1], best[2]

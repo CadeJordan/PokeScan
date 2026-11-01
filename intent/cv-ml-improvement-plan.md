@@ -8,6 +8,7 @@ Specs written from this plan:
 - [[stable-grouped-split]]: items 4 and 9
 - [[face-side-orientation-guard]]: item 6
 - [[reject-unusable-uploads]]: item 7 (open question 2) and the guard's same-side case
+- [[tighter-slab-crops]]: item 8
 
 Small fixes found in the review are in `intent/smallfix.md` §10.
 
@@ -125,7 +126,9 @@ Ranked by impact over effort. Effort: S < ½ day, M = 1–2 days, L > 3 days.
 - **Evidence:** on the 19 PSA certs with a fallback face, live-pipeline MAE is 0.84, against 0.49 overall. Predictions include 9→6 and 10→7. On user photos (not slabs) the input is further out of distribution, and that's unmeasured.
 - **Impact:** medium. **Effort:** S once the contract is decided (open question 2). **Dependencies:** item 1 first, which removes most fallbacks.
 
-### 8. Crop quality: `well` and `small` crops
+### 8. Crop quality: `well` and `small` crops (spec: [[tighter-slab-crops]])
+
+*Done 2026-10-31.* The detector now steps from a same-colour slab gasket to the card (a flat ring around a textured border) and no longer steps into inner art frames. 107 PSA faces changed: 'well' fronts went from 109 to 49 and 'small' from 53 to 40, and 27 'card' quads moved (26 corrected, 1 sticker box slightly larger). CV on the changed certs: paired ΔMAE −0.029 [−0.059, −0.002]; overall unchanged within noise. Re-cropped and retrained (`ten_cutoff` 0.58 → 0.56), and the face guard retrained and shipped. Test, once: MAE 0.456 → 0.443 and exact 64.0% → 65.3%, mostly from the cutoff. About 34 wells whose nested outline is weak, 19 with no closed card outline and 21 inner-frame 'small' faces remain. The text below describes the state before.
 
 - **Problem:** about 5% of fit-set fronts are cropped at the slab well (`crop_kind='well'`), and 2% at an inner frame or small card (`small`). Corner and edge features then see the gasket or art instead of the card edge.
 - **Evidence** (out-of-fold, MAE vs always-10 MAE on the same rows): card 0.441 vs 0.653, well 0.482 vs 0.562, small 0.622 vs 0.911. On test (live): card 0.476, well 0.545, small 1.11 (n=9).
