@@ -1,6 +1,7 @@
 "use client";
 
 import type { CenteringSubGrade, GradeResponse } from "@/app/api-client";
+import { perGradeProbs } from "@/lib/gradeProbs";
 
 type Props = { result: GradeResponse };
 
@@ -32,7 +33,8 @@ const GradeResult = ({ result }: Props) => {
           Prediction
         </span>
         <span className="font-mono text-[11px] tracking-wider text-zinc-600">
-          generated · {new Date().toISOString().split("T")[0]}
+          <span className="hidden sm:inline">generated · </span>
+          {new Date().toISOString().split("T")[0]}
         </span>
       </div>
 
@@ -105,17 +107,16 @@ const GradeResult = ({ result }: Props) => {
       <details className="group border-t border-white/[0.08]">
         <summary className="flex cursor-pointer select-none items-center justify-between px-5 py-3 transition hover:bg-white/[0.02]">
           <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-500">
-            Distribution over grades
+            Chance of each grade
           </span>
           <span className="text-xs text-zinc-600 transition group-open:rotate-180">
             ▾
           </span>
         </summary>
         <div className="border-t border-white/[0.06] px-5 py-4">
-          <ol className="grid grid-cols-9 gap-1.5">
-            {rank_probs.map((p, i) => {
-              const pct = Math.max(0, Math.min(1, p));
-              const isPick = i + 2 === grade_int;
+          <ol className="grid grid-cols-10 gap-1 sm:gap-1.5">
+            {perGradeProbs(rank_probs).map((p, i) => {
+              const isPick = i + 1 === grade_int;
               return (
                 <li
                   key={i}
@@ -127,7 +128,7 @@ const GradeResult = ({ result }: Props) => {
                         isPick ? "bg-amber-300" : "bg-zinc-700"
                       }`}
                       style={{
-                        height: `${Math.max(pct * 100, 2)}%`,
+                        height: `${Math.max(p * 100, 2)}%`,
                       }}
                     />
                   </div>
@@ -136,7 +137,7 @@ const GradeResult = ({ result }: Props) => {
                       isPick ? "text-amber-300" : "text-zinc-500"
                     }`}
                   >
-                    &gt;{i + 1}
+                    {i + 1}
                   </span>
                   <span
                     className={`font-mono text-[10px] tabular-nums ${
@@ -150,7 +151,9 @@ const GradeResult = ({ result }: Props) => {
             })}
           </ol>
           <p className="mt-3 font-mono text-[11px] text-zinc-600">
-            P(grade &gt; N) — cumulative output of the ordinal grade head
+            The highlighted grade is the prediction: the middle of this
+            distribution, so on a close call it can sit next to a taller
+            bar.
           </p>
         </div>
       </details>

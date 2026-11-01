@@ -116,9 +116,11 @@ Owner decision (2026-10-27), in this round's PR: write the graph and sidecar to 
 
 ## Result card follow-ups ([[result-copy-matches-probe-model]] re-test, 2026-10-30)
 
-- [ ] `frontend/src/components/GradeResult.tsx`: the distribution chart highlights the bar ">grade_int−1" (`isPick`: `i + 2 === grade_int`), which is P(grade ≥ grade_int), shown right under the confidence caption "probability of this exact grade". The two only agree for a 10. Either show per-grade probabilities (differences of `rank_probs`) with the predicted grade highlighted, or relabel. The heading "Distribution over grades" names a cumulative chart.
+- [x] `frontend/src/components/GradeResult.tsx`: the distribution chart highlights the bar ">grade_int−1" (`isPick`: `i + 2 === grade_int`), which is P(grade ≥ grade_int), shown right under the confidence caption "probability of this exact grade". The two only agree for a 10. Either show per-grade probabilities (differences of `rank_probs`) with the predicted grade highlighted, or relabel. The heading "Distribution over grades" names a cumulative chart. Specced in [[result-chart-exact-grades]].
+  - Done 2026-10-31: the chart shows P(grade = k) for 1–10 (`frontend/src/lib/gradeProbs.ts`, clip and renormalise as in `decode`) with `grade_int` highlighted, so the highlighted bar is the confidence; heading "Chance of each grade". See [[result-chart-exact-grades]] Implementation.
 - [ ] Backend region hints "clean / slight wear / wear / heavy wear" (`backend/app/api/grade.py` `_REGION_HINTS`) read as physical wear, but they are thresholds on a region's soft overall-grade signal. Needs an owner call: they are part of the API response.
-- [ ] At 320 px, "generated · <date>" wraps into "PREDICTION" in the result header strip.
+- [x] At 320 px, "generated · <date>" wraps into "PREDICTION" in the result header strip. Specced in [[result-chart-exact-grades]].
+  - Done 2026-10-31: the "generated ·" prefix is hidden below `sm`; the date stays, on one line at 320 px.
 
 ## Full-resolution pilot follow-ups ([[full-resolution-pilot]], 2026-10-31)
 
