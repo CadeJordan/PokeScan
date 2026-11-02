@@ -255,6 +255,111 @@ def test_load_manifest_validates(tmp_path):
         load_manifest(p)
 
 
+def test_load_manifest_keeps_extra_columns_as_tags(tmp_path):
+    from ml.eval.evaluate import load_manifest
+
+    (tmp_path / "f.jpg").write_bytes(b"x")
+    p = tmp_path / "phone.csv"
+    p.write_text(
+        "front,back,grade,id,Shot,cert,in_db_split\n"
+        "f.jpg,f.jpg,9,1_careful,careful,1,test\n"
+        "f.jpg,f.jpg,9,1_casual, casual ,1,\n",
+        encoding="utf-8",
+    )
+    samples = {s.cert: s for s in load_manifest(p)}
+    assert samples["1_careful"].tags == {"shot": "careful", "cert": "1", "in_db_split": "test"}
+    assert samples["1_casual"].tags == {"shot": "casual", "cert": "1", "in_db_split": ""}
+    # No extra columns: no tags.
+    p.write_text("front,back,grade,id\nf.jpg,f.jpg,9,a\n", encoding="utf-8")
+    assert load_manifest(p)[0].tags == {}
+
+
+# --------------------------------------------------------------------------- #
+# Manifest tags: by_tag breakdown and card-level (grouped) bootstrap
+# --------------------------------------------------------------------------- #
+def _tagged_rows():
+    rows = _rows(n=6)
+    rows["grade"] = np.array([10, 10, 9, 9, 8, 8])
+    rows["pred_int"] = np.array([10, 9, 9, 9, 6, 8])
+    rows["reject"] = np.array(["", "card_not_found", "", "same_side", "card_not_found", ""])
+    rows["tag:shot"] = np.array(["careful", "casual"] * 3)
+    rows["tag:cert"] = np.array(["a", "a", "b", "b", "c", "c"])
+    rows["tag:in_db_split"] = np.array(["absent", "absent", "train", "train", "test", "test"])
+    return rows
+
+
+def test_by_tag_breakdown():
+    pl = build_report(_tagged_rows(), n_boot=0)["pipeline"]
+    by_tag = pl["by_tag"]
+    assert list(by_tag) == ["shot", "in_db_split"]  # the cert column only groups
+    assert by_tag["shot"]["careful"] == {
+        "n": 3, "mae": pytest.approx(2 / 3), "exact": pytest.approx(2 / 3),
+        "n_would_reject": {"card_not_found": 1, "same_side": 0},
+    }
+    assert by_tag["shot"]["casual"] == {
+        "n": 3, "mae": pytest.approx(1 / 3), "exact": pytest.approx(2 / 3),
+        "n_would_reject": {"card_not_found": 1, "same_side": 1},
+    }
+    assert list(by_tag["in_db_split"]) == ["absent", "test", "train"]
+    assert by_tag["in_db_split"]["test"]["mae"] == 1.0
+    assert by_tag["in_db_split"]["train"]["exact"] == 1.0
+
+
+def test_db_split_report_has_no_by_tag_and_row_cis():
+    """A report without tags (every DB split) is what it was before tags existed."""
+    from ml.eval.evaluate import overall_ci, per_grade
+
+    rows = _rows()
+    r = build_report(rows, n_boot=50)
+    assert "by_tag" not in r["pipeline"]
+    assert set(r["pipeline"]) == {
+        "quad_found_front", "quad_found_back", "mae_both_found", "mae_fallback", "n_fallback",
+        "crop_kinds",
+    }
+    assert "n_groups" not in r["overall_ci"]
+    assert r["overall_ci"] == overall_ci(rows["grade"], rows["pred_int"], rows["pred_soft"], 50)
+    assert r["per_grade"] == per_grade(rows["grade"], rows["pred_int"], rows["pred_soft"], 50)
+
+
+def test_grouped_bootstrap_resamples_cards():
+    """Every card shot twice, identically: card-level CIs equal those of one row per
+    card (same draws), while row-level CIs on the doubled rows come out narrower."""
+    from ml.eval.evaluate import bootstrap_ci, overall_ci
+
+    one = _rows(n=30, seed=3)
+    t, p, s = one["grade"], one["pred_int"], one["pred_soft"]
+    cards = np.arange(30)
+    t2, p2, s2, g2 = (np.repeat(x, 2) for x in (t, p, s, cards))
+    grouped = overall_ci(t2, p2, s2, n_boot=300, groups=g2)
+    plain = overall_ci(t, p, s, n_boot=300)
+    assert grouped["n_groups"] == 30
+    for key in ("mae", "exact", "qwk", "bias"):
+        assert grouped[key] == pytest.approx(plain[key]), key
+    rows_ci = overall_ci(t2, p2, s2, n_boot=300)
+    assert rows_ci["mae"][1] - rows_ci["mae"][0] < plain["mae"][1] - plain["mae"][0]
+
+    err = np.abs(p - t).astype(float)
+    err2 = np.repeat(err, 2)
+    assert bootstrap_ci(lambda i: err2[i].mean(), 60, 200, groups=g2) == pytest.approx(
+        bootstrap_ci(lambda i: err[i].mean(), 30, 200)
+    )
+    # Group labels needn't be sorted or contiguous: rows of a card stay together.
+    seen = []
+    bootstrap_ci(lambda i: seen.append(np.asarray(i)) or 0.0, 4, 20,
+                 groups=np.array(["y", "x", "y", "x"]))
+    for i in seen:
+        assert np.isin([0, 2], i).all() or not np.isin([0, 2], i).any()
+        assert (i == 0).sum() == (i == 2).sum() and (i == 1).sum() == (i == 3).sum()
+
+
+def test_report_with_cert_tag_uses_card_level_cis():
+    rows = _tagged_rows()
+    r = build_report(rows, n_boot=100)
+    assert r["overall_ci"]["n_groups"] == 3
+    rows.pop("tag:cert")
+    assert "n_groups" not in build_report(rows, n_boot=100)["overall_ci"]
+
+
 # --------------------------------------------------------------------------- #
 # Crop kinds + excluding fallback (label-visible) cards
 # --------------------------------------------------------------------------- #
@@ -330,6 +435,36 @@ def test_exclude_fallback_drops_leaky_cards(tmp_path, monkeypatch):
     assert clean["pipeline"]["excluded_from_metrics"] == 2
     assert clean["pipeline"]["n_fallback"] == 2  # pipeline still describes every card
     assert clean["meta"]["exclude_fallback"] is True
+    assert "by_tag" not in leaky["pipeline"] and "by_tag" not in clean["pipeline"]
+
+
+def test_manifest_run_carries_tags_into_report(tmp_path, monkeypatch):
+    """A phone-set manifest run end to end: tags reach rows, by_tag and card-level CIs."""
+    import backend.app.ml.inference as inference
+    import ml.eval.evaluate as ev
+
+    lines = ["front,back,grade,id,shot,cert,in_db_split"]
+    for cert, grade, split in (("1", 10, "absent"), ("2", 9, "train")):
+        for shot, found in (("careful", False), ("casual", True)):
+            f = tmp_path / f"{cert}_{shot}.jpg"
+            f.write_bytes(f"{grade:02d}".encode() + (b"found" if found else b"fallback"))
+            lines.append(f"{f.name},{f.name},{grade},{cert}_{shot},{shot},{cert},{split}")
+    manifest = tmp_path / "manifest.csv"
+    manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    monkeypatch.setattr(inference, "GradeInferenceService", _FakeService)
+    monkeypatch.setattr(ev, "load_samples", lambda split, limit=None: [])
+
+    service = _FakeService()
+    rows = ev.predict_all(service, ev.load_manifest(manifest), progress=False)
+    assert list(rows["tag:shot"]) == ["careful", "casual", "careful", "casual"]
+    assert list(rows["tag:cert"]) == ["1", "1", "2", "2"]
+
+    r = ev.run_evaluation(manifest=manifest, robustness_limit=0, progress=False, n_boot=20)
+    by_shot = r["pipeline"]["by_tag"]["shot"]
+    # _FakeService grades a found card 1, a fallback card its true grade.
+    assert by_shot["careful"]["exact"] == 1.0 and by_shot["casual"]["exact"] == 0.0
+    assert set(r["pipeline"]["by_tag"]["in_db_split"]) == {"absent", "train"}
+    assert r["overall_ci"]["n_groups"] == 2
 
 
 # --------------------------------------------------------------------------- #

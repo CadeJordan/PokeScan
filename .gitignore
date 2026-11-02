@@ -19,6 +19,8 @@ data/models/
 data/backups/
 data/*.sqlite
 data/*.sqlite-*
+# the owner's phone photos of their slabs (intent/phone-photo-eval-set)
+data/phone_eval/
 
 # Never commit training data / DB copies under frontend (easy mistake after `cd frontend`)
 frontend/data/
