@@ -501,7 +501,25 @@ raw/charizard_front.jpg,raw/charizard_back.jpg,8,charizard-1
 python -m ml.eval.evaluate --manifest data/raw_eval/manifest.csv --out-dir test-artifacts/eval/raw
 ```
 
-Relative paths resolve against the CSV's folder; `id` is optional.
+Relative paths resolve against the CSV's folder; `id` is optional. Any other
+column is kept as a tag: the report breaks results down by each one
+(`pipeline.by_tag`), and a `cert` column makes the CIs resample cards, not rows.
+
+**Phone photos of your slabs.** To measure the pipeline on phone photos rather
+than PSA's catalogue shots, put photos of your own slabs in `data/phone_eval/`
+(gitignored) as `photos/<cert>_<careful|casual>_<front|back>.jpg`, with a
+hand-written `cards.csv` (`cert,grade[,notes]`, from the PSA label). JPEG, PNG or
+WebP only: on an iPhone set Camera → Formats → "Most Compatible" (HEIC is an
+error). Then:
+
+```powershell
+python -m ml.eval.phone_set build data/phone_eval   # checks the photos, writes manifest.csv
+python -m ml.eval.evaluate --manifest data/phone_eval/manifest.csv --out-dir test-artifacts/eval/phone_set
+```
+
+The manifest's `in_db_split` (looked up read-only) says whether a cert is in the
+DB; quote the `absent`/`test` rows, since a train/val cert's catalogue photo was
+trained on. If the DB can't be read every cert is `unknown`, never `absent`. Protocol and write-up: `intent/phone-photo-eval-set/intent.md`.
 
 ## Data sources
 

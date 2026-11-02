@@ -14,10 +14,13 @@ CORN decode) on raw front/back photos and writes a JSON report plus charts.
 Metrics
 - accuracy: MAE (soft + hard), exact, off-by-one, quadratic weighted kappa
 - uncertainty: 95% bootstrap CIs for MAE / QWK / exact / bias; per-grade
-  Wilson CI for recall and bootstrap CI for MAE
+  Wilson CI for recall and bootstrap CI for MAE. A manifest with a `cert`
+  column (several photo pairs per card) resamples cards, not rows
 - per grade: support, recall, MAE, bias; confusion matrix; 9-vs-10 band
 - calibration: ECE, reliability bins, accuracy vs. coverage
-- pipeline: card-quad found rate, MAE split by quad found vs. fallback
+- pipeline: card-quad found rate, MAE split by quad found vs. fallback; for a
+  manifest with extra columns (e.g. the phone set's `shot`, `in_db_split`),
+  count / MAE / exact / would-reject per value of each (`by_tag`)
 - robustness: MAE delta / grade-flip rate under blur, JPEG, rotation, lighting,
   and swapped front/back uploads (`--perturbations` picks a subset)
 - face guard: per prediction, and per cert in each robustness run, the guard's
@@ -32,7 +35,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
@@ -140,18 +143,38 @@ def wilson_interval(successes: int, n: int, z: float = 1.96) -> tuple[float, flo
     return (float(max(0.0, centre - half)), float(min(1.0, centre + half)))
 
 
+def _group_members(groups) -> list[np.ndarray]:
+    """Row indices of each group, groups in sorted label order."""
+    _, inverse = np.unique(np.asarray(groups), return_inverse=True)
+    inverse = inverse.ravel()
+    return [np.flatnonzero(inverse == g) for g in range(int(inverse.max()) + 1)]
+
+
 def bootstrap_ci(
     stat: Callable[[np.ndarray], float],
     n: int,
     n_boot: int = 1000,
     alpha: float = 0.05,
     seed: int = 0,
+    groups: np.ndarray | None = None,
 ) -> tuple[float, float]:
-    """Percentile bootstrap CI of ``stat(indices)`` resampling ``n`` items with replacement."""
+    """Percentile bootstrap CI of ``stat(indices)`` resampling ``n`` items with replacement.
+
+    With ``groups`` (one label per item) whole groups are resampled instead, so
+    the rows of one card (several photo pairs) stay together.
+    """
     if n <= 0 or n_boot <= 0:
         return (float("nan"), float("nan"))
     rng = np.random.default_rng(seed)
-    vals = np.array([stat(rng.integers(0, n, n)) for _ in range(n_boot)], np.float64)
+    if groups is None:
+        vals = np.array([stat(rng.integers(0, n, n)) for _ in range(n_boot)], np.float64)
+    else:
+        members = _group_members(groups)
+        k = len(members)
+        vals = np.array(
+            [stat(np.concatenate([members[g] for g in rng.integers(0, k, k)])) for _ in range(n_boot)],
+            np.float64,
+        )
     vals = vals[~np.isnan(vals)]
     if not len(vals):
         return (float("nan"), float("nan"))
@@ -160,37 +183,74 @@ def bootstrap_ci(
 
 
 def overall_ci(
-    true: np.ndarray, pred_int: np.ndarray, pred_soft: np.ndarray, n_boot: int = 1000, seed: int = 0
+    true: np.ndarray,
+    pred_int: np.ndarray,
+    pred_soft: np.ndarray,
+    n_boot: int = 1000,
+    seed: int = 0,
+    groups: np.ndarray | None = None,
 ) -> dict:
-    """95% bootstrap CIs for the headline metrics (same resamples for each metric)."""
+    """95% bootstrap CIs for the headline metrics (same resamples for each metric).
+
+    With ``groups`` (one label per row, e.g. the cert) whole groups are
+    resampled, so a card with two photo pairs is one draw; the result then also
+    has ``n_groups``.
+    """
     true = np.asarray(true, int)
     pred_int = np.asarray(pred_int, int)
     pred_soft = np.asarray(pred_soft, np.float64)
     n = len(true)
     if n == 0 or n_boot <= 0:
         return {}
-    idx = np.random.default_rng(seed).integers(0, n, (n_boot, n))
-    t, p, s = true[idx], pred_int[idx], pred_soft[idx]
-    diff = np.abs(p - t)
-    qwk = np.array([quadratic_weighted_kappa(t[i], p[i]) for i in range(n_boot)])
 
     def pct(v: np.ndarray) -> list[float]:
         v = v[~np.isnan(v)]
         return [float(x) for x in np.percentile(v, [2.5, 97.5])] if len(v) else [float("nan")] * 2
 
+    if groups is None:
+        idx = np.random.default_rng(seed).integers(0, n, (n_boot, n))
+        t, p, s = true[idx], pred_int[idx], pred_soft[idx]
+        diff = np.abs(p - t)
+        qwk = np.array([quadratic_weighted_kappa(t[i], p[i]) for i in range(n_boot)])
+        return {
+            "n_boot": int(n_boot),
+            "mae": pct(diff.mean(1)),
+            "exact": pct((diff == 0).mean(1).astype(np.float64)),
+            "qwk": pct(qwk),
+            "bias": pct((s - t).mean(1)),
+        }
+    # Resamples differ in length (cards can have different numbers of rows): loop.
+    members = _group_members(groups)
+    k = len(members)
+    draws = np.random.default_rng(seed).integers(0, k, (n_boot, k))
+    stats = np.empty((n_boot, 4), np.float64)
+    for b in range(n_boot):
+        i = np.concatenate([members[g] for g in draws[b]])
+        diff = np.abs(pred_int[i] - true[i])
+        stats[b] = (diff.mean(), (diff == 0).mean(), quadratic_weighted_kappa(true[i], pred_int[i]),
+                    (pred_soft[i] - true[i]).mean())
     return {
         "n_boot": int(n_boot),
-        "mae": pct(diff.mean(1)),
-        "exact": pct((diff == 0).mean(1).astype(np.float64)),
-        "qwk": pct(qwk),
-        "bias": pct((s - t).mean(1)),
+        "n_groups": k,
+        "mae": pct(stats[:, 0]),
+        "exact": pct(stats[:, 1]),
+        "qwk": pct(stats[:, 2]),
+        "bias": pct(stats[:, 3]),
     }
 
 
 def per_grade(
-    true: np.ndarray, pred_int: np.ndarray, pred_soft: np.ndarray, n_boot: int = 1000
+    true: np.ndarray,
+    pred_int: np.ndarray,
+    pred_soft: np.ndarray,
+    n_boot: int = 1000,
+    groups: np.ndarray | None = None,
 ) -> dict:
-    """Per true grade: support, recall (+Wilson 95% CI), MAE (+bootstrap CI), bias."""
+    """Per true grade: support, recall (+Wilson 95% CI), MAE (+bootstrap CI), bias.
+
+    ``groups`` makes the MAE CI resample groups (cards); the Wilson recall CI
+    still counts rows.
+    """
     true = np.asarray(true, int)
     pred_int = np.asarray(pred_int, int)
     pred_soft = np.asarray(pred_soft, np.float64)
@@ -206,7 +266,10 @@ def per_grade(
             "recall": float(hits / m.sum()),
             "recall_ci": list(wilson_interval(hits, int(m.sum()))),
             "mae": float(err.mean()),
-            "mae_ci": list(bootstrap_ci(lambda i, e=err: e[i].mean(), len(err), n_boot, seed=g)),
+            "mae_ci": list(bootstrap_ci(
+                lambda i, e=err: e[i].mean(), len(err), n_boot, seed=g,
+                groups=None if groups is None else np.asarray(groups)[m],
+            )),
             "bias": float((pred_soft[m] - g).mean()),
         }
     return out
@@ -305,6 +368,8 @@ class Sample:
     front: Path
     back: Path
     crop_kind: str = "unknown"  # combined front/back kind recorded by precrop
+    # A manifest's extra columns (e.g. shot, cert, in_db_split); empty for DB splits.
+    tags: dict[str, str] = field(default_factory=dict)
 
 
 # Worst-first: a pair is as good as its worse side.
@@ -348,12 +413,18 @@ def load_samples(split: str, limit: int | None = None) -> list[Sample]:
     ]
 
 
+_MANIFEST_COLUMNS = ("front", "back", "grade", "id")
+
+
 def load_manifest(path: Path, limit: int | None = None) -> list[Sample]:
     """Labelled photos outside the DB, e.g. raw (unslabbed) cards.
 
-    CSV with header columns ``front,back,grade`` and optional ``id``. Relative
-    image paths resolve against the CSV's folder. Rows whose images are missing
-    are skipped with a warning; a bad grade raises.
+    CSV with header columns ``front,back,grade`` and optional ``id``. Any other
+    column is kept as a per-sample tag (`Sample.tags`, e.g. the phone set's
+    ``shot``, ``cert``, ``in_db_split``): the report breaks results down by
+    each (`by_tag`), and a ``cert`` column makes the CIs resample cards.
+    Relative image paths resolve against the CSV's folder. Rows whose images
+    are missing are skipped with a warning; a bad grade raises.
     """
     import csv
 
@@ -366,6 +437,10 @@ def load_manifest(path: Path, limit: int | None = None) -> list[Sample]:
         missing = {"front", "back", "grade"} - cols
         if missing:
             raise ValueError(f"{path}: manifest missing columns {sorted(missing)}")
+        tag_cols = [
+            c for c in dict.fromkeys(c.strip().lower() for c in reader.fieldnames if c)
+            if c not in _MANIFEST_COLUMNS
+        ]
         for i, raw in enumerate(reader, start=2):
             row = {k.strip().lower(): (v or "").strip() for k, v in raw.items() if k}
             grade = int(float(row["grade"]))
@@ -377,7 +452,8 @@ def load_manifest(path: Path, limit: int | None = None) -> list[Sample]:
             if not (front.exists() and back.exists()):
                 log.warning("%s:%d: image missing, skipped (%s / %s)", path, i, front, back)
                 continue
-            out.append(Sample(row.get("id") or f"{path.stem}:{i}", grade, front, back))
+            tags = {c: row.get(c, "") for c in tag_cols}
+            out.append(Sample(row.get("id") or f"{path.stem}:{i}", grade, front, back, tags=tags))
     out.sort(key=lambda s: s.cert)
     return out[:limit] if limit else out
 
@@ -390,7 +466,9 @@ def predict_all(
 
     keys = ("cert", "grade", "pred_int", "pred_soft", "confidence", "quad_front", "quad_back",
             "latency", "crop_kind", "notes", "reject")
-    rows = {k: [] for k in (*keys, *GUARD_PROBS)}
+    # Manifest tags become `tag:<column>` rows (none for DB splits).
+    tag_keys = [f"{TAG_PREFIX}{c}" for c in dict.fromkeys(c for s in samples for c in s.tags)]
+    rows = {k: [] for k in (*keys, *GUARD_PROBS, *tag_keys)}
     it = tqdm(samples, desc=perturb or "eval", disable=not progress)
     for s in it:
         front, back = s.front.read_bytes(), s.back.read_bytes()
@@ -411,11 +489,18 @@ def predict_all(
         rows["quad_front"].append(p.found_quad_front)
         rows["quad_back"].append(p.found_quad_back)
         rows["crop_kind"].append(s.crop_kind)
+        for key in tag_keys:
+            rows[key].append(s.tags.get(key[len(TAG_PREFIX):], ""))
         decision = getattr(p, "guard_decision", None)
         for key in GUARD_PROBS:
             rows[key].append(_pair(getattr(decision, key, None)))
     return {k: np.asarray(v) for k, v in rows.items()}
 
+
+TAG_PREFIX = "tag:"
+# The tag column that names the card: CIs resample by it, and it gets no
+# `by_tag` breakdown (one entry per card says nothing).
+GROUP_TAG = "cert"
 
 # The face guard's probabilities per prediction, (n, 2) with NaN where the guard
 # didn't compute one: P(back) per uploaded row, P(flipped) per face after a swap.
@@ -451,6 +536,29 @@ def crop_kind_breakdown(rows: dict) -> dict:
     }
 
 
+def tag_breakdown(rows: dict) -> dict:
+    """Per manifest tag column (but `GROUP_TAG`), per value: count, MAE, exact, would-reject.
+
+    Empty when the rows have no tags (DB splits).
+    """
+    err = np.abs(rows["pred_int"] - rows["grade"])
+    out = {}
+    for key, values in rows.items():
+        if not key.startswith(TAG_PREFIX) or key == TAG_PREFIX + GROUP_TAG:
+            continue
+        out[key[len(TAG_PREFIX):]] = {
+            str(v): {
+                "n": int(m.sum()),
+                "mae": float(err[m].mean()),
+                "exact": float((err[m] == 0).mean()),
+                **({"n_would_reject": would_reject_counts(rows["reject"][m])} if "reject" in rows else {}),
+            }
+            for v in sorted(set(values.tolist()))
+            for m in [values == v]
+        }
+    return out
+
+
 def would_reject_counts(reject: np.ndarray) -> dict[str, int]:
     """How many inputs `/api/grade` would refuse (422), per rejection kind."""
     return {kind: int((reject == kind).sum()) for kind in ("card_not_found", "same_side")}
@@ -465,10 +573,12 @@ def build_report(
     both_found = rows["quad_front"] & rows["quad_back"]
     band = np.isin(true, [9, 10])
     lat = rows["latency"] * 1000
+    groups = rows.get(TAG_PREFIX + GROUP_TAG)  # a manifest's cert column: resample cards
+    by_tag = tag_breakdown(rows)
     report = {
         "overall": summarize(true, pi, ps),
-        "overall_ci": overall_ci(true, pi, ps, n_boot),
-        "per_grade": per_grade(true, pi, ps, n_boot),
+        "overall_ci": overall_ci(true, pi, ps, n_boot, groups=groups),
+        "per_grade": per_grade(true, pi, ps, n_boot, groups=groups),
         "confusion_matrix": confusion(true, pi).tolist(),
         "grade_9_vs_10": summarize(true[band], pi[band], ps[band]) if band.any() else None,
         "calibration": {
@@ -486,6 +596,7 @@ def build_report(
             "n_fallback": int((~both_found).sum()),
             "crop_kinds": crop_kind_breakdown(rows),
             **({"n_would_reject": would_reject_counts(rows["reject"])} if "reject" in rows else {}),
+            **({"by_tag": by_tag} if by_tag else {}),
         },
         "latency_ms": {
             "p50": float(np.percentile(lat, 50)),
@@ -763,7 +874,8 @@ def main(
     save_baseline: bool = typer.Option(False, help="Pin these numbers as the regression baseline."),
     manifest: Path | None = typer.Option(
         None, exists=True, readable=True,
-        help="Evaluate a labelled CSV (front,back,grade[,id]) instead of a DB split, e.g. raw cards.",
+        help="Evaluate a labelled CSV (front,back,grade[,id], extra columns kept as tags) "
+        "instead of a DB split, e.g. raw cards or the phone set.",
     ),
     tta: bool = typer.Option(
         False, help="Test-time augmentation: average over hflip + dim/bright variants."
@@ -802,6 +914,8 @@ def main(
                f"off-by-one {o['off_by_one']:.1%}  QWK {o['qwk']:.3f}  bias {o['bias']:+.2f}")
     ci = report.get("overall_ci") or {}
     if ci:
+        if "n_groups" in ci:
+            typer.echo(f"  (CIs resample {ci['n_groups']} cards, not rows)")
         typer.echo(f"  95% CI: MAE [{ci['mae'][0]:.3f}, {ci['mae'][1]:.3f}]  "
                    f"QWK [{ci['qwk'][0]:.3f}, {ci['qwk'][1]:.3f}]  "
                    f"exact [{ci['exact'][0]:.1%}, {ci['exact'][1]:.1%}]  "
@@ -825,6 +939,11 @@ def main(
     if pl.get("crop_kinds"):
         typer.echo("  crop kinds: " + "  ".join(
             f"{k} n={v['n']} MAE {v['mae']:.2f}" for k, v in pl["crop_kinds"].items()))
+    for tag, values in pl.get("by_tag", {}).items():
+        typer.echo(f"  by {tag}: " + "  ".join(
+            f"{k} n={v['n']} MAE {v['mae']:.2f} exact {v['exact']:.0%}"
+            + (f" refused {sum(v['n_would_reject'].values())}" if "n_would_reject" in v else "")
+            for k, v in values.items()))
     typer.echo(f"  latency p50 {report['latency_ms']['p50']:.0f} ms  p95 {report['latency_ms']['p95']:.0f} ms")
     for name, r in report.get("robustness", {}).items():
         typer.echo(f"  {name:12s} MAE {r['mae']:.3f} ({r['mae_delta']:+.3f})  flips {r['grade_flip_rate']:.1%}")
