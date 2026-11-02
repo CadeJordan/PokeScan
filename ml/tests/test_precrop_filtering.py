@@ -91,8 +91,7 @@ def test_raw_mode_returns_all_raw_photos(db):
     assert all("crops" not in r.front_path.parts for r in recs)
 
 
-def test_precrop_coverage(db):
-    assert dataset.precrop_coverage("train") == (2, 6)
+def test_db_precrop_coverage_by_split(db):
     with connect(db.db_path) as conn:
         cov = precrop_coverage_by_split(conn)["train"]
     # DB-level counts (file existence is checked by load_records only)

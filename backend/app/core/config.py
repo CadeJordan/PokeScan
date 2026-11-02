@@ -44,6 +44,14 @@ class Settings(BaseSettings):
     grade_head_path: Path = PROJECT_ROOT / "data" / "models" / "grade_head.npz"
     feature_model_path: Path = PROJECT_ROOT / "data" / "models" / "card_features.onnx"
 
+    # Grades run at once per API process (`api/grade.py`); a request over the
+    # limit waits up to `grade_queue_timeout_s` for a slot, then gets a 503.
+    # Measured (intent/serving-hardening): each extra concurrent grade adds only
+    # ~20-25 MB, and 1 at a time costs ~15% throughput, so the default is 4.
+    # Running uvicorn with `--workers N` multiplies it.
+    grade_concurrency: int = Field(default=4, ge=1)
+    grade_queue_timeout_s: float = Field(default=30.0, gt=0)
+
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     cors_origins: str = "http://localhost:3000"

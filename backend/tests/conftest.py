@@ -82,5 +82,7 @@ def client(fake_service: FakeService, monkeypatch: pytest.MonkeyPatch) -> Iterat
 
     monkeypatch.setattr(grade_mod, "get_inference_service", lambda: fake_service)
     monkeypatch.setattr(main_mod, "get_inference_service", lambda: fake_service)
+    grade_mod.reset_grade_limiter()  # a fresh grading limiter per test client
     with TestClient(main_mod.create_app()) as c:
         yield c
+    grade_mod.reset_grade_limiter()

@@ -99,9 +99,3 @@ def load_records(
             len(rows),
         )
     return out
-
-
-def precrop_coverage(split: str, crop_kinds: tuple[str, ...] | None = None) -> tuple[int, int]:
-    """(certs with a usable precrop, all certs) for `split`."""
-    total = len(load_records(split, use_precrop=False))
-    return len(load_records(split, use_precrop=True, crop_kinds=crop_kinds)), total

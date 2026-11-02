@@ -41,6 +41,8 @@ def create_app() -> FastAPI:
         allow_origins=settings.cors_origins_list or ["*"],
         allow_methods=["GET", "POST"],
         allow_headers=["*"],
+        # A browser client can read when to retry a 503 "server busy".
+        expose_headers=["Retry-After"],
     )
     app.include_router(grade_router, prefix="/api")
     return app
