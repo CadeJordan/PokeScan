@@ -297,6 +297,90 @@ def test_detection_speed():
 
 
 # --------------------------------------------------------------------------- #
+# Slab failure types on PSA photos (intent/tighter-slab-crops)
+# --------------------------------------------------------------------------- #
+def _slab_well(rng: np.random.Generator, well_luma: int) -> tuple[np.ndarray, np.ndarray]:
+    """A 1024x610 slab photo: plastic, label, a bright lip around a grey well,
+    and the card's (axis-aligned) outline centred in the well, roughly as PSA
+    frames it. The caller paints the card into the outline."""
+    h, w = 1024, 610
+    img = (175 + rng.normal(0, 2, (h, w, 3))).clip(0, 255).astype(np.uint8)
+    cv2.rectangle(img, (30, 40), (580, 220), (60, 50, 230), -1)  # label
+    cv2.rectangle(img, (40, 50), (570, 210), (245, 245, 245), -1)
+    wx0, wy0, wx1, wy1 = 40, 250, 570, 1000
+    cv2.rectangle(img, (wx0 - 6, wy0 - 6), (wx1 + 6, wy1 + 6), (215, 215, 215), -1)
+    well = well_luma + rng.normal(0, 3, (wy1 - wy0, wx1 - wx0, 1))
+    img[wy0:wy1, wx0:wx1] = well.clip(0, 255).astype(np.uint8)
+    ch = int(0.655 * h)
+    cw = int(ch * 5 / 7)
+    x0 = (wx0 + wx1 - cw) // 2 + int(rng.integers(-6, 7))
+    y0 = (wy0 + wy1 - ch) // 2 + int(rng.integers(-6, 7))
+    quad = np.array([[x0, y0], [x0 + cw, y0], [x0 + cw, y0 + ch], [x0, y0 + ch]], np.float32)
+    return img, quad
+
+
+def _silver_full_art_in_grey_well(seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """Silver-bordered full-art card in a grey well: border and gasket have the
+    same brightness and no colour, so only texture tells them apart."""
+    rng = np.random.default_rng(seed)
+    img, quad = _slab_well(rng, well_luma=90)
+    (x0, y0), (x1, y1) = quad[0].astype(int), quad[2].astype(int)
+    ch, cw = y1 - y0, x1 - x0
+    tex = cv2.GaussianBlur(rng.normal(0, 1, (ch, cw)).astype(np.float32), (0, 0), 3)
+    card = np.repeat((tex / tex.std() * 25 + 88)[..., None], 3, 2)
+    for _ in range(6):  # soft colour in the artwork, well inside the card
+        r = int(rng.uniform(0.08, 0.15) * cw)
+        centre = (int(rng.uniform(0.25, 0.75) * cw), int(rng.uniform(0.2, 0.8) * ch))
+        blob = np.zeros((ch, cw), np.float32)
+        cv2.circle(blob, centre, r, 1.0, -1)
+        blob = cv2.GaussianBlur(blob, (0, 0), r / 3)[..., None]
+        card = card * (1 - blob) + rng.uniform(60, 200, 3) * blob
+    img[y0:y1, x0:x1] = card.clip(0, 255).astype(np.uint8)
+    cv2.rectangle(img, (x0, y0), (x1 - 1, y1 - 1), (55, 55, 55), 2)  # the card's edge
+    return img, quad
+
+
+def _card_with_partial_inner_frame(seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """Grey-bordered card in a dark well whose art panel is card-shaped but has
+    half its bottom edge faded out: a weak, partial inner outline."""
+    rng = np.random.default_rng(seed)
+    img, quad = _slab_well(rng, well_luma=70)
+    (x0, y0), (x1, y1) = quad[0].astype(int), quad[2].astype(int)
+    ch, cw = y1 - y0, x1 - x0
+    card = np.full((ch, cw, 3), 120, np.float32)
+    b = int(0.08 * cw)
+    ph, pw = int((cw - 2 * b) / 0.74), cw - 2 * b
+    fade = np.ones((ph, pw, 1), np.float32)
+    fade[-150:, pw // 2 :] = np.linspace(1, 0, 150, dtype=np.float32)[:, None, None]
+    card[b : b + ph, b : b + pw] = np.array([40, 120, 200], np.float32) * fade + 120 * (1 - fade)
+    img[y0:y1, x0:x1] = card.astype(np.uint8)
+    return img, quad
+
+
+@pytest.mark.parametrize("seed", range(4))
+@pytest.mark.parametrize(
+    "scene",
+    [
+        # Was the well: the flat grey gasket and the silver border look alike
+        # to `_is_holder`'s brightness and colour tests.
+        pytest.param(_silver_full_art_in_grey_well, id="silver_full_art_in_grey_well"),
+        # Was the art panel: a second holder step went from the card into its
+        # weak inner outline.
+        pytest.param(_card_with_partial_inner_frame, id="partial_inner_frame"),
+    ],
+)
+def test_slab_photo_finds_the_card(scene, seed, tmp_path):
+    img, quad = scene(seed)
+    path = tmp_path / "slab.jpg"
+    path.write_bytes(to_jpeg_bytes(img, quality=95))
+    crop = detect_and_crop(path.read_bytes())
+    assert crop.found_quad
+    err = corner_error(crop.quad, quad) / quad_diagonal(quad)
+    assert err <= MAX_CORNER_ERR, f"corner error {err:.3%} of diagonal"
+    assert polygon_iou(crop.quad, quad, img.shape[:2]) >= MIN_IOU
+
+
+# --------------------------------------------------------------------------- #
 # Negatives / fallback
 # --------------------------------------------------------------------------- #
 def _square_scene() -> np.ndarray:
