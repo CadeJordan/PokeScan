@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
+import anyio
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from backend.app.ml.inference import GradePrediction, get_inference_service
+from backend.app.core.config import get_settings
+from backend.app.ml.inference import (
+    GradeInferenceService,
+    GradePrediction,
+    get_inference_service,
+)
 from backend.app.ml.preprocess import ImageDecodeError
 
 log = logging.getLogger(__name__)
@@ -19,6 +27,51 @@ router = APIRouter(tags=["grade"])
 MAX_BYTES = 12 * 1024 * 1024  # 12 MB per image
 # Keep in sync with `preprocess.UPLOAD_FORMATS`, the formats decoded from bytes.
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp"}
+# Seconds a client is told to wait after a 503 "server busy": a grade takes ~3 s,
+# so a slot is usually free by then.
+BUSY_RETRY_AFTER_S = 5
+
+# Grading slots for this process (`settings.grade_concurrency`). Created on
+# first use, so the token count comes from the settings in force then.
+_grade_limiter: anyio.CapacityLimiter | None = None
+
+
+def grade_limiter() -> anyio.CapacityLimiter:
+    global _grade_limiter
+    if _grade_limiter is None:
+        _grade_limiter = anyio.CapacityLimiter(get_settings().grade_concurrency)
+    return _grade_limiter
+
+
+def reset_grade_limiter() -> None:
+    """Drop the limiter so the next request makes a new one (tests, settings changes)."""
+    global _grade_limiter
+    _grade_limiter = None
+
+
+@asynccontextmanager
+async def _grading_slot() -> AsyncIterator[None]:
+    """Hold one grading token for the body, or raise 503 if none frees up in time.
+
+    Only the wait for the token is under the timeout, so a request that times
+    out has done no model work. Blocking calls in the body run to completion
+    even if the request is cancelled (`run_in_threadpool` isn't abandoned on
+    cancel), so the token is released only once the model work has stopped.
+    """
+    limiter = grade_limiter()
+    try:
+        with anyio.fail_after(get_settings().grade_queue_timeout_s):
+            await limiter.acquire()
+    except TimeoutError:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="server busy, try again",
+            headers={"Retry-After": str(BUSY_RETRY_AFTER_S)},
+        ) from None
+    try:
+        yield
+    finally:
+        limiter.release()
 
 
 class CenteringSubGrade(BaseModel):
@@ -94,7 +147,22 @@ async def grade_card(
     back_bytes = await _read_image(back, "back")
 
     # Model inference and the centering sub-grade are seconds of CPU work; run them
-    # off the event loop so other requests (e.g. /health) aren't blocked.
+    # off the event loop so other requests (e.g. /health) aren't blocked, and
+    # under one grading token so concurrent uploads queue instead of piling up.
+    async with _grading_slot():
+        pred, sub, notes = await _grade(service, front_bytes, back_bytes)
+
+    for name in ("corners", "edges", "surface"):
+        grade = round(pred.region_grades[name], 1)  # hint matches the shown grade
+        hint, flags = _region_hint(grade)
+        setattr(sub, name, FactorSubGrade(grade=grade, hint=hint, flags=flags))
+    return _response(pred, sub, notes)
+
+
+async def _grade(
+    service: GradeInferenceService, front_bytes: bytes, back_bytes: bytes
+) -> tuple[GradePrediction, SubGrades, list[str]]:
+    """Predict + centering for one request; the caller holds a grading token."""
     try:
         pred: GradePrediction = await run_in_threadpool(service.predict, front_bytes, back_bytes)
     except ImageDecodeError as exc:
@@ -131,12 +199,7 @@ async def grade_card(
             notes.append("centering: back borders unclear; graded from the front only")
     except Exception as exc:  # noqa: BLE001
         log.debug("centering subgrade unavailable: %s", exc)
-
-    for name in ("corners", "edges", "surface"):
-        grade = round(pred.region_grades[name], 1)  # hint matches the shown grade
-        hint, flags = _region_hint(grade)
-        setattr(sub, name, FactorSubGrade(grade=grade, hint=hint, flags=flags))
-    return _response(pred, sub, notes)
+    return pred, sub, notes
 
 
 # Region soft grade -> UI hint. A region grade is the overall grade that region

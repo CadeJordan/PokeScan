@@ -380,6 +380,74 @@ def test_slab_photo_finds_the_card(scene, seed, tmp_path):
     assert polygon_iou(crop.quad, quad, img.shape[:2]) >= MIN_IOU
 
 
+def _raw_card_flat_border(
+    seed: int, border_luma: int, window_luma: int, frame_luma: int | None, angle: float = 0.0
+) -> tuple[np.ndarray, np.ndarray]:
+    """A raw card (no slab) on a plain light background: a flat dark border
+    around a strongly textured art window of about the same brightness, framed
+    by a thin line (`frame_luma`, or none). The flat border looks like a gasket
+    around a textured card to the flat-ring test (`_is_holder(allow_flat=...)`)."""
+    rng = np.random.default_rng(seed)
+    h, w = 1024, 768
+    img = (205 + rng.normal(0, 2, (h, w, 3))).clip(0, 255).astype(np.uint8)
+    ch = int(0.78 * h)
+    cw = int(ch * 5 / 7)
+    card = border_luma + rng.normal(0, 2, (ch, cw, 1)).repeat(3, 2).astype(np.float32)
+    b = int(0.06 * cw)
+    wh, ww = ch - 2 * b, cw - 2 * b
+    tex = cv2.GaussianBlur(rng.normal(0, 1, (wh, ww)).astype(np.float32), (0, 0), 3)
+    card[b : b + wh, b : b + ww] = (tex / tex.std() * 30 + window_luma)[..., None]
+    if frame_luma is not None:
+        cv2.rectangle(card, (b, b), (b + ww - 1, b + wh - 1), (frame_luma,) * 3, 2)
+    src = np.array([[0, 0], [cw, 0], [cw, ch], [0, ch]], np.float32)
+    quad = src + np.array([(w - cw) // 2, (h - ch) // 2], np.float32)
+    if angle:
+        m = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
+        quad = (np.hstack([quad, np.ones((4, 1), np.float32)]) @ m.T).astype(np.float32)
+    hom = cv2.getPerspectiveTransform(src, quad)
+    mask = cv2.warpPerspective(np.full((ch, cw), 255, np.uint8), hom, (w, h))
+    warped = cv2.warpPerspective(card.clip(0, 255).astype(np.uint8), hom, (w, h))
+    img[mask > 0] = warped[mask > 0]
+    return img, quad
+
+
+RAW_CARD_MIN_IOU = 0.9
+# Known weakness (intent/serving-hardening, section 3): when the art window has
+# a visible frame line it is a strong nested outline, and the last-resort
+# flat-ring step takes the card's flat border for a gasket, at the first step,
+# exactly as it must for `silver_full_art_in_grey_well`. The two scenes look the
+# same to the detector; no constraint on that step tried (first step only, past
+# the first step, `best` not card-height) keeps the slab scenes and fixes these,
+# so the detector is unchanged. Non-strict, so a fix shows up as XPASS.
+_RAW_WINDOW_XFAIL = pytest.mark.xfail(
+    reason="last-resort flat-ring step crops a framed art window inside a flat dark border",
+    strict=False,
+)
+
+
+@pytest.mark.parametrize(
+    ("border", "window", "frame", "angle"),
+    [
+        pytest.param(40, 40, 160, 0.0, id="b40_w40_light_frame", marks=_RAW_WINDOW_XFAIL),
+        pytest.param(70, 60, 20, 0.0, id="b70_w60_dark_frame", marks=_RAW_WINDOW_XFAIL),
+        pytest.param(70, 70, None, 0.0, id="b70_w70_no_frame"),
+        pytest.param(100, 115, 160, 0.0, id="b100_w115_light_frame", marks=_RAW_WINDOW_XFAIL),
+        pytest.param(120, 120, 20, 0.0, id="b120_w120_dark_frame", marks=_RAW_WINDOW_XFAIL),
+        pytest.param(70, 70, 160, 4.0, id="b70_w70_light_frame_tilted", marks=_RAW_WINDOW_XFAIL),
+    ],
+)
+def test_raw_card_with_flat_border_keeps_its_outline(border, window, frame, angle, tmp_path):
+    """Raw uploads (intent/serving-hardening): a card's own flat border is not
+    a slab gasket, so the crop must keep the card's outline, not its art window."""
+    img, quad = _raw_card_flat_border(0, border, window, frame, angle)
+    path = tmp_path / "raw.jpg"
+    path.write_bytes(to_jpeg_bytes(img, quality=95))
+    crop = detect_and_crop(path.read_bytes())
+    assert crop.found_quad
+    iou = polygon_iou(crop.quad, quad, img.shape[:2])
+    assert iou >= RAW_CARD_MIN_IOU, f"IoU {iou:.3f} with the card (art window is ~0.81)"
+
+
 # --------------------------------------------------------------------------- #
 # Negatives / fallback
 # --------------------------------------------------------------------------- #

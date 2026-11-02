@@ -15,39 +15,14 @@ Small fixes found in the review are in `intent/smallfix.md` §10.
 
 ## How the system performs now
 
-> 2026-10-27: superseded for test numbers. The test split was re-assigned by card (item 9, [[stable-grouped-split]] phase 2), so the test rows below describe the old per-cert split, and the CV rows the old fit set. Current numbers: `docs/adr/0002-card-grouped-test-split.md`.
->
-> 2026-10-31: current baseline after [[cv-fold-stratification]] (CV folds stratified on ≤7 / 8 / 9 / 10; head retrained 2026-10-31T21:21:45Z, 2,241 fit certs, card-grouped test split). The 2026-10-23 table below is kept as history.
->
-> | | n | MAE | exact | QWK | ECE | AUC ≤8 vs ≥9 | AUC 10 vs 9 |
-> |---|---|---|---|---|---|---|---|
-> | Card-grouped 5-fold CV (train+val), seed 0 | 2241 | 0.468 | 64.1% | 0.577 | 0.031 | 0.851 | 0.724 |
-> | Card-grouped 5-fold CV, mean ± SD over seeds 0–4 | 2241 | 0.464 ± 0.006 | 64.3% | 0.579 ± 0.002 | 0.038 | 0.855 | 0.725 ± 0.006 |
-> | Test, precrop features (all unseen cards) | 370 | 0.438 | 66.5% | 0.499 | 0.052 | 0.829 | 0.782 |
-> | Test, live pipeline (`ml.eval.evaluate`, `test-artifacts/eval/cv_folds`) | 375 | 0.435 | 66.7% | 0.506 | 0.049 | 0.832 | 0.778 |
-> | Always 10, test (live) | 375 | 0.656 | 56.8% | 0 | | | |
-
-Probe model (`data/models/grade_head.json`, trained 2026-10-23, commit `77a34ea`, 2,223 fit certs, all PSA):
+Current head (`data/models/grade_head.json`): trained 2026-10-31 (`trained_at` 2026-11-01T05:09:11Z) on the [[tighter-slab-crops]] crops, 2,241 fit certs, `ten_cutoff` 0.56 (tuned on CV seeds 0–4, `docs/adr/0003-grade-decision-rule.md`). The test split is card-grouped (`docs/adr/0002-card-grouped-test-split.md`) and gives one final number per change.
 
 | | n | MAE | exact | QWK | ECE | AUC ≤8 vs ≥9 | AUC 10 vs 9 |
 |---|---|---|---|---|---|---|---|
-| Card-grouped 5-fold CV (train+val) | 2223 | 0.447 | 65.1% | 0.620 | 0.036 | 0.853 | 0.739 |
-| Test, precrop features | 388 | 0.490 | 62.1% | 0.524 | 0.057 | 0.856 | 0.732 |
-| Test, cards also in train+val | 251 | 0.414 | 66.5% | 0.516 | | | |
-| Test, unseen cards | 137 | 0.628 | 54.0% | 0.510 | 0.073 | 0.833 | 0.638 |
-| Test, live pipeline (`ml.eval.evaluate`, raw photos) | 393 | 0.494 | 62.1% | 0.511 | 0.067 | | |
-| Always 10, test | 393 | 0.636 | 59.3% | 0 | | | |
+| Card-grouped 5-fold CV (train+val), seed 0 | 2,241 | 0.4645 | 63.4% | 0.585 | 0.029 | 0.852 | 0.722 |
+| Test once, live pipeline (`ml.eval.evaluate`, `test-artifacts/eval/tighter_crops`) | 375 | 0.443 | 65.3% | 0.512 | 0.052 | 0.839 | 0.774 |
 
-- I reproduced the CV and test numbers exactly from the cached features (CV takes 85 s).
-- Per-grade recall on test (live pipeline): 10: 90%, 9: 20%, 8: 37%, ≤7: 2 of 20. Grade-10 bias is −0.41, grade-9 bias is +0.31.
-- Latency (live pipeline, CPU): p50 2.5 s per front+back pair (`test-artifacts/eval/probe/report.json`), ~2.7 s in my runs. Detection takes ~110 ms per 1024-px face. The rest is DINOv2.
-- Detection on PSA photos: a quad is found on 98.9% of fronts and 99.7% of backs. 19 of 2,630 certs miss on at least one face. Crop kinds in the fit set: card 93%, `well` 5%, `small` 2%.
-- The fast suite is 381 passed, 2 xfailed, 182 deselected (120 s). The `smallfix.md` header still says 248/3.
-
-Calibration and the decode rule are fine as they are. I checked:
-- On the CV out-of-fold probabilities, the NLL-optimal temperature is exactly 1.00. The meta probe trains on out-of-fold soft grades, so it comes out calibrated.
-- Median decoding (current) has the best MAE. Argmax gives 0.462 MAE / 0.590 QWK, round(soft) gives 0.467 / 0.618. Moving the P(>9) cutoff between 0.45 and 0.55 changes MAE by ≤0.005 and QWK by ≤0.002.
-- So I propose no calibration or decode work. ECE does rise on unseen cards (0.073), which is part of item 9, not a calibration problem.
+Sources: the CV row is `grade_head.json`'s `cv_grouped`; the test row is the [[tighter-slab-crops]] Phase 2 results (one end-to-end test run). History: the 2026-10-23 review table (per-cert test split), the 2026-10-31 [[cv-fold-stratification]] table and the review's notes on latency, detection and calibration are in git history (`git show 26b0c59:intent/cv-ml-improvement-plan.md`); later per-change numbers are in ADRs 0002/0003 and [[tighter-slab-crops]].
 
 ## Urgent and correct (bugs)
 
@@ -134,6 +109,7 @@ Ranked by impact over effort. Effort: S < ½ day, M = 1–2 days, L > 3 days.
 - **Problem:** about 5% of fit-set fronts are cropped at the slab well (`crop_kind='well'`), and 2% at an inner frame or small card (`small`). Corner and edge features then see the gasket or art instead of the card edge.
 - **Evidence** (out-of-fold, MAE vs always-10 MAE on the same rows): card 0.441 vs 0.653, well 0.482 vs 0.562, small 0.622 vs 0.911. On test (live): card 0.476, well 0.545, small 1.11 (n=9).
 - **Impact:** low–medium (7% of certs, a partial gain). **Effort:** M (detector work, then `precrop --force` and a feature re-extraction; depends on item 3). Not specced.
+- **Follow-up (2026-11-02, [[serving-hardening]] section 3):** on raw uploads, the last-resort flat-ring step can crop a card with a flat dark border to its framed art window (IoU ~0.81). `test_raw_card_with_flat_border_keeps_its_outline` has 5 non-strict xfail cases for this. No constraint on that step fixes them and keeps the slab scenes; 84 PSA faces depend on it. Deferred: the owner chose to wait for the phone-photo set (item 13) before any detector work.
 
 ### 9. The test split isn't card-grouped (phase 2 of [[stable-grouped-split]], needs decision)
 

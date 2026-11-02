@@ -254,12 +254,29 @@ def majority_baseline(y: np.ndarray, majority: int) -> dict:
 
 
 def _git_commit() -> str | None:
+    """HEAD of the repo, for model provenance (`train_probe`, `train_face_guard`).
+
+    Returns None, with a WARNING saying why, when git can't answer (not on
+    PATH, not a repo, refused, e.g. "dubious ownership"), so a null
+    `git_commit` in a model's metadata is never silent.
+    """
     try:
-        return subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, capture_output=True, text=True, check=True
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        return None
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+    else:
+        commit = result.stdout.strip()
+        if result.returncode == 0 and commit:
+            return commit
+        reason = f"exit {result.returncode}: {result.stderr.strip() or '(no stderr)'}"
+    log.warning("git_commit unavailable (`git rev-parse HEAD` in %s): %s; recording null", PROJECT_ROOT, reason)
+    return None
 
 
 def _rounded(d: dict) -> dict:

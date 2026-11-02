@@ -140,6 +140,8 @@ uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000
 - Health: http://localhost:8000/api/health  
 - OpenAPI docs: http://localhost:8000/docs  
 
+Grading is bounded per process: at most `GRADE_CONCURRENCY` grades run at once (default 4: each extra concurrent grade adds only ~20–25 MB, and running one at a time costs ~15% throughput, `intent/serving-hardening`), and a request over the limit waits up to `GRADE_QUEUE_TIMEOUT_S` seconds (default 30) for a slot, then gets 503 `"server busy, try again"` with a `Retry-After` header. `/api/health` is never queued. The limit is per process, so `uvicorn --workers N` allows N × `GRADE_CONCURRENCY` grades at once (and loads the model N times).
+
 ### 2. Start the frontend
 
 In a second terminal:
@@ -430,7 +432,7 @@ pytest
 | 413 | Image over 12 MB |
 | 415 | Content type isn't JPEG, PNG or WebP |
 | 422 | No card outline found on a face ("card not found; retake the photo on a plain background"), or the face guard reads both photos as backs (or both as fronts). Also a missing `front`/`back` field |
-| 503 | No grade model loaded (`/api/health` says why) |
+| 503 | No grade model loaded (`/api/health` says why), or the server is busy: no grading slot freed up within `GRADE_QUEUE_TIMEOUT_S` (`"server busy, try again"`, with `Retry-After`) |
 
 
 ## License / disclaimer
