@@ -41,11 +41,10 @@ class FactorSubGrade(BaseModel):
 class SubGrades(BaseModel):
     """Per-factor breakdown.
 
-    `centering` is classical-CV geometry. With the probe grade model,
-    `corners`, `edges`, `surface` are the soft grades its corner, edge-strip
-    and centre-region probes give (both faces); they are learned from overall
-    PSA grades, not PSA sub-grades. Without it they fall back to the
-    classical-CV condition analysis (whitening, wear, cut, scratches/creases).
+    `centering` is classical-CV geometry. `corners`, `edges`, `surface` are
+    the soft grades the probe grade model's corner, edge-strip and
+    centre-region probes give (both faces); they are learned from overall PSA
+    grades, not PSA sub-grades.
     """
 
     centering: CenteringSubGrade | None = None
@@ -94,7 +93,7 @@ async def grade_card(
     front_bytes = await _read_image(front, "front")
     back_bytes = await _read_image(back, "back")
 
-    # Model inference and the CV sub-grades are seconds of CPU work; run them
+    # Model inference and the centering sub-grade are seconds of CPU work; run them
     # off the event loop so other requests (e.g. /health) aren't blocked.
     try:
         pred: GradePrediction = await run_in_threadpool(service.predict, front_bytes, back_bytes)
@@ -112,10 +111,6 @@ async def grade_card(
     # Face guard notes first (swap / rotation): the notes below describe the
     # faces as graded, i.e. after the guard.
     notes: list[str] = list(pred.notes)
-    if not pred.found_quad_front:
-        notes.append("front: card outline not auto-detected; used center-padded fallback")
-    if not pred.found_quad_back:
-        notes.append("back: card outline not auto-detected; used center-padded fallback")
     # Reuse the model's crops so each face is detected once per request.
     faces = pred.crops if pred.crops is not None else (front_bytes, back_bytes)
     if pred.crops is not None:
@@ -137,32 +132,10 @@ async def grade_card(
     except Exception as exc:  # noqa: BLE001
         log.debug("centering subgrade unavailable: %s", exc)
 
-    if pred.region_grades is not None:
-        for name in ("corners", "edges", "surface"):
-            grade = round(pred.region_grades[name], 1)  # hint matches the shown grade
-            hint, flags = _region_hint(grade)
-            setattr(sub, name, FactorSubGrade(grade=grade, hint=hint, flags=flags))
-        return _response(pred, sub, notes)
-
-    try:
-        from backend.app.ml.condition import compute_condition_subgrades
-
-        cond = await run_in_threadpool(compute_condition_subgrades, *faces)
-        for name in ("corners", "edges", "surface"):
-            factor = getattr(cond, name)
-            setattr(
-                sub,
-                name,
-                FactorSubGrade(
-                    grade=round(factor.grade, 1),
-                    hint=factor.hint,
-                    flags=factor.flags,
-                ),
-            )
-    except Exception as exc:  # noqa: BLE001
-        log.debug("condition subgrades unavailable: %s", exc)
-        notes.append("corner/edge/surface analysis unavailable for these images")
-
+    for name in ("corners", "edges", "surface"):
+        grade = round(pred.region_grades[name], 1)  # hint matches the shown grade
+        hint, flags = _region_hint(grade)
+        setattr(sub, name, FactorSubGrade(grade=grade, hint=hint, flags=flags))
     return _response(pred, sub, notes)
 
 

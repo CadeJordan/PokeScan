@@ -1,4 +1,4 @@
-"""Regression gate: the exported model must not get worse on the test split.
+"""Regression gate: the served probe model must not get worse on the test split.
 
 Compares against ml/eval/baseline.json (pin it with
 `python -m ml.eval.evaluate --save-baseline`). Without a baseline, falls back

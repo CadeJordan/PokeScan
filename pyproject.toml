@@ -1,16 +1,13 @@
 [project]
 name = "pokescan"
 version = "0.1.0"
-description = "Pokemon card grading via end-to-end CNN trained on PSA cert images"
+description = "Pokemon card grading from front/back photos: frozen DINOv2 region features + linear ordinal probes"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.4.0",
     "torchvision>=0.19.0",
-    "pytorch-lightning>=2.4.0",
     "timm>=1.0.11",
-    "coral-pytorch>=1.4.0",
-    "albumentations>=1.4.18",
     "opencv-python>=4.10.0.84",
     "pillow>=10.4.0",
     "numpy>=1.26.0,<2.0",
@@ -25,7 +22,6 @@ dependencies = [
     "tenacity>=9.0.0",
     "onnx>=1.17.0",
     "onnxruntime>=1.20.0",
-    "wandb>=0.18.0",
     "tqdm>=4.66.5",
     "rich>=13.9.0",
     "typer>=0.13.0",
@@ -66,6 +62,6 @@ asyncio_mode = "auto"
 testpaths = ["backend/tests", "ml/tests"]
 markers = [
     "slow: long-running (sweeps, full test-split evaluation)",
-    "model: needs exported weights in data/models/ (skips if missing)",
+    "model: needs the trained probe model in data/models/ (skips if missing)",
     "visual: writes outline/centering overlays to test-artifacts/overlays/",
 ]

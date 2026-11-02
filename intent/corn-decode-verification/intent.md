@@ -1,5 +1,7 @@
 # CORN decode verification
 
+> **Closed (2026-11-01), won't do:** the CORN model and `decode_corn_logits` were removed in [[retire-legacy-model]]; the served probe model is proportional-odds and monotone by construction.
+
 ## Intent
 
 Settle, with a test, whether `decode_corn_logits` interprets the head's outputs the same way `corn_loss` trains them. If it doesn't, document the impact on the soft grade and confidence before anyone decides to change it.

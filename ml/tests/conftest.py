@@ -7,7 +7,7 @@ from backend.app.core.config import get_settings
 
 @pytest.fixture(scope="session")
 def models_dir():
-    d = get_settings().models_dir
-    if not (d / "grade_model.onnx").exists():
-        pytest.skip(f"no exported model in {d}")
-    return d
+    s = get_settings()
+    if not (s.grade_head_path.exists() and s.feature_model_path.exists()):
+        pytest.skip(f"probe model not trained in {s.models_dir}")
+    return s.models_dir

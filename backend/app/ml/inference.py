@@ -1,24 +1,20 @@
 """ONNX Runtime inference for the grade model.
 
-Two model kinds, picked at load time:
+The probe model: frozen DINOv2 region features (`card_features.onnx`) + the
+linear ordinal head (`grade_head.npz`). See `features.py` and `grade_head.py`;
+trained by `python -m ml.training.train_probe`.
 
-- probe (preferred): frozen DINOv2 region features (`card_features.onnx`) +
-  the linear ordinal head (`grade_head.npz`). See `features.py` and
-  `grade_head.py`; trained by `python -m ml.training.train_probe`.
-- legacy: the end-to-end ConvNeXt CORN model (`grade_model.onnx`) from
-  `python -m ml.training.export`. Used when an explicit `model_path` is given,
-  or with ALLOW_LEGACY_MODEL=1 when the probe is missing or fails to load.
+If it is missing or fails to load, the service fails closed: no model is
+loaded, `/api/grade` returns 503 and `metadata["probe_load_error"]` (shown by
+`/api/health`) says why.
 
-Otherwise the service fails closed: no model is loaded, `/api/grade` returns
-503 and `metadata["probe_load_error"]` (shown by `/api/health`) says why.
-
-With the probe model, the face guard (`face_guard.py`, `face_guard.npz` next to
-the head) swaps swapped uploads back and rotates upside-down faces before the
-head runs, with a note. When it reads both faces as the same side it changes
-nothing and sets `GradePrediction.same_side`; `predict` still grades the pair,
-and `/api/grade` refuses it with 422 (via `GradePrediction.rejection()`). It
-fails open: if it can't be loaded or trusted,
-`metadata["face_guard_load_error"]` says why and grading runs without it.
+The face guard (`face_guard.py`, `face_guard.npz` next to the head) swaps
+swapped uploads back and rotates upside-down faces before the head runs, with a
+note. When it reads both faces as the same side it changes nothing and sets
+`GradePrediction.same_side`; `predict` still grades the pair, and `/api/grade`
+refuses it with 422 (via `GradePrediction.rejection()`). It fails open: if it
+can't be loaded or trusted, `metadata["face_guard_load_error"]` says why and
+grading runs without it.
 
 Thread-safe for concurrent requests.
 """
@@ -52,28 +48,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-_IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-
 
 def _jpeg_roundtrip(rgb: np.ndarray) -> np.ndarray:
     buf = np.frombuffer(encode_jpeg(rgb), np.uint8)
     return cv2.cvtColor(cv2.imdecode(buf, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
-
-
-def _scale_brightness(rgb: np.ndarray, factor: float) -> np.ndarray:
-    return np.clip(rgb.astype(np.float32) * factor, 0, 255).astype(np.uint8)
-
-
-# Test-time augmentation variants (applied to the cropped RGB card). Only
-# condition-preserving changes: mirror + mild exposure. Off by default.
-TTA_VARIANTS = {
-    "identity": lambda im: im,
-    "hflip": lambda im: np.ascontiguousarray(im[:, ::-1]),
-    "dim": lambda im: _scale_brightness(im, 0.9),
-    "bright": lambda im: _scale_brightness(im, 1.1),
-}
-DEFAULT_TTA = ("identity", "hflip", "dim", "bright")
 
 
 @dataclass(slots=True)
@@ -84,11 +62,11 @@ class GradePrediction:
     rank_probs: list[float]  # cumulative P(grade > k) for k in 1..9
     found_quad_front: bool
     found_quad_back: bool
-    # Probe model only: soft grade suggested by each region group
-    # (corners / edges / surface / global), used for the sub-grades.
-    region_grades: dict[str, float] | None = None
+    # Soft grade suggested by each region group (corners / edges / surface /
+    # global), used for the sub-grades.
+    region_grades: dict[str, float]
     # The (front, back) crops the grade was computed from, so callers (the
-    # centering and condition sub-grades) reuse them instead of detecting again.
+    # centering sub-grade) reuse them instead of detecting again.
     # Not part of the prediction's value: left out of == and repr (big arrays).
     crops: tuple[CardCrop, CardCrop] | None = field(default=None, compare=False, repr=False)
     # What the face guard changed about the input, for the response notes.
@@ -106,14 +84,11 @@ class GradePrediction:
     def rejection(self) -> tuple[str, str] | None:
         """`(kind, message)` when `/api/grade` refuses this prediction (422), else None.
 
-        Probe model only: a face with no card outline (the padded whole photo,
-        which the probe never trained on) is `"card_not_found"`, and a pair the
-        face guard read as two of one side is `"same_side"`. The prediction is
-        still made, so `ml.eval` grades these inputs and counts them. The legacy
-        model grades them as before, with a note.
+        A face with no card outline (the padded whole photo, which the probe
+        never trained on) is `"card_not_found"`, and a pair the face guard read
+        as two of one side is `"same_side"`. The prediction is still made, so
+        `ml.eval` grades these inputs and counts them.
         """
-        if self.region_grades is None:
-            return None
         # Name faces as uploaded: after a guard swap the graded front is the uploaded back.
         found = (self.found_quad_front, self.found_quad_back)
         if self.swapped:
@@ -167,42 +142,24 @@ def _rotate_crop(crop: CardCrop) -> CardCrop:
 
 
 class GradeInferenceService:
-    """Wraps the model session(s) + the preprocessing pipeline."""
+    """Wraps the probe model's sessions + the preprocessing pipeline."""
 
     def __init__(
         self,
-        model_path: Path | None = None,
-        tta: bool | tuple[str, ...] = False,
         head_path: Path | None = None,
         features_path: Path | None = None,
     ) -> None:
-        """``model_path`` selects the legacy CORN ONNX model explicitly. Otherwise
-        the probe model (``head_path`` + ``features_path``, defaulting to the
-        settings) is the only model served.
+        """Load the probe model (``head_path`` + ``features_path``, defaulting to
+        the settings).
 
-        If a probe file is missing or loading fails (corrupt file, head and
-        feature model don't match, a `ten_cutoff` in the head's metadata that
-        isn't a number in [0.5, 1)), the error is kept in ``metadata`` as
-        ``probe_load_error`` and the service is not ready, unless
-        ``settings.allow_legacy_model`` is set: then the legacy active model is
-        loaded instead. ``kind`` stays "legacy" until a probe loads; it only
-        matters when ``ready``.
-
-        ``tta`` (legacy model only): False (default, single pass), True
-        (DEFAULT_TTA) or variant names. With TTA the ONNX model runs once on a
-        batch of variants and the cumulative probabilities are averaged.
+        If a file is missing or loading fails (corrupt file, head and feature
+        model don't match, a `ten_cutoff` in the head's metadata that isn't a
+        number in [0.5, 1)), the error is kept in ``metadata`` as
+        ``probe_load_error`` and the service is not ready.
         """
         settings = get_settings()
-        if tta is True:
-            tta = DEFAULT_TTA
-        unknown = set(tta or ()) - set(TTA_VARIANTS)
-        if unknown:
-            raise ValueError(f"unknown TTA variants: {sorted(unknown)}")
-        self.tta: tuple[str, ...] = tuple(tta or ())
         self.head_path = Path(head_path or settings.grade_head_path)
         self.features_path = Path(features_path or settings.feature_model_path)
-        self.kind = "legacy"
-        self.model_path = Path(model_path or settings.active_model_path)
         self.probe_load_error: str | None = None
         self.face_guard_load_error: str | None = None
         self._guard = None
@@ -210,38 +167,18 @@ class GradeInferenceService:
         self._meta: dict = {}
         self._ten_cutoff = 0.5  # the probe head's P(10) cut-off, set by _load_probe
         self._lock = Lock()
-        if model_path is None:
-            try:
-                self._load_probe()
-            except Exception as exc:  # noqa: BLE001
-                self.probe_load_error = f"{type(exc).__name__}: {exc}"
-                self._session, self._meta = None, {}
-                trace = not isinstance(exc, FileNotFoundError)
-                if not settings.allow_legacy_model:
-                    log.error(
-                        "probe grade model %s + %s not loaded (%s); /grade will return 503. "
-                        "Set ALLOW_LEGACY_MODEL=1 to serve the legacy model instead",
-                        self.head_path,
-                        self.features_path,
-                        self.probe_load_error,
-                        exc_info=trace,
-                    )
-                    return
-                log.warning(
-                    "probe grade model %s + %s not loaded (%s); ALLOW_LEGACY_MODEL is set, "
-                    "falling back to legacy %s",
-                    self.head_path,
-                    self.features_path,
-                    self.probe_load_error,
-                    self.model_path,
-                    exc_info=trace,
-                )
-            else:
-                self.kind, self.model_path = "probe", self.head_path
-                if self.tta:
-                    raise ValueError("TTA applies to the legacy model only")
-                return
-        self._load()
+        try:
+            self._load_probe()
+        except Exception as exc:  # noqa: BLE001
+            self.probe_load_error = f"{type(exc).__name__}: {exc}"
+            self._session, self._meta = None, {}
+            log.error(
+                "probe grade model %s + %s not loaded (%s); /grade will return 503",
+                self.head_path,
+                self.features_path,
+                self.probe_load_error,
+                exc_info=not isinstance(exc, FileNotFoundError),
+            )
 
     def _load_probe(self) -> None:
         from backend.app.ml.features import FeatureExtractor
@@ -369,31 +306,6 @@ class GradeInferenceService:
                 feat_hash,
             )
 
-    def _load(self) -> None:
-        if not self.model_path.exists():
-            log.warning(
-                "active model not found at %s - /grade endpoint will return 503",
-                self.model_path,
-            )
-            return
-        sess_opts = ort.SessionOptions()
-        sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        providers = (
-            ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            if "CUDAExecutionProvider" in ort.get_available_providers()
-            else ["CPUExecutionProvider"]
-        )
-        self._session = ort.InferenceSession(
-            str(self.model_path), sess_options=sess_opts, providers=providers
-        )
-        meta_path = self.model_path.with_suffix(".json")
-        if meta_path.exists():
-            try:
-                self._meta = json.loads(meta_path.read_text())
-            except json.JSONDecodeError:
-                log.exception("could not parse model metadata at %s", meta_path)
-        log.info("loaded grade model %s (providers=%s)", self.model_path, providers)
-
     @property
     def ready(self) -> bool:
         return self._session is not None
@@ -404,7 +316,7 @@ class GradeInferenceService:
         if self.probe_load_error is not None:
             meta["probe_load_error"] = self.probe_load_error
         # Only when a face_guard.npz exists: without one, metadata is as before.
-        if self.kind == "probe" and (self._guard is not None or self.face_guard_load_error):
+        if self._guard is not None or self.face_guard_load_error:
             guard = self._guard
             meta["face_guard"] = {
                 "loaded": guard is not None,
@@ -415,12 +327,6 @@ class GradeInferenceService:
                 meta["face_guard_load_error"] = self.face_guard_load_error
         return meta
 
-    def _to_tensor(self, rgb: np.ndarray) -> np.ndarray:
-        x = rgb.astype(np.float32) / 255.0
-        x = (x - _IMAGENET_MEAN) / _IMAGENET_STD
-        x = np.transpose(x, (2, 0, 1))[None, ...]  # (1, 3, H, W)
-        return np.ascontiguousarray(x)
-
     def predict(self, front_bytes: bytes, back_bytes: bytes) -> GradePrediction:
         if self._session is None:
             raise RuntimeError("grade model not loaded")
@@ -429,46 +335,7 @@ class GradeInferenceService:
         back_crop = detect_face(back_bytes, "back")
         if front_crop.image.shape[:2] != (CARD_H, CARD_W):
             raise RuntimeError("preprocessing produced wrong shape")
-        if self.kind == "probe":
-            return self._predict_probe(front_crop, back_crop)
-
-        variants = self.tta or ("identity",)
-        front_x = np.concatenate(
-            [self._to_tensor(TTA_VARIANTS[v](front_crop.image)) for v in variants]
-        )
-        back_x = np.concatenate(
-            [self._to_tensor(TTA_VARIANTS[v](back_crop.image)) for v in variants]
-        )
-
-        with self._lock:
-            outputs = self._session.run(
-                ["corn_logits"],
-                {"front": front_x, "back": back_x},
-            )
-        logits = outputs[0]  # (V, K-1)
-        probs = 1.0 / (1.0 + np.exp(-logits))
-        probs = np.minimum.accumulate(probs, axis=1)  # enforce monotonicity
-        probs = probs.mean(axis=0)  # average over TTA variants (V=1 without TTA)
-        hard_rank = int(1 + (probs > 0.5).sum())
-        expected = float(1.0 + probs.sum())
-
-        # Per-class probabilities for confidence.
-        cum_full = np.concatenate([[1.0], probs, [0.0]])
-        per_class = np.clip(cum_full[:-1] - cum_full[1:], 0.0, None)
-        s = per_class.sum()
-        if s > 0:
-            per_class /= s
-        confidence = float(per_class[max(0, min(hard_rank - 1, len(per_class) - 1))])
-
-        return GradePrediction(
-            grade=expected,
-            grade_int=hard_rank,
-            confidence=confidence,
-            rank_probs=[float(p) for p in probs],
-            found_quad_front=front_crop.found_quad,
-            found_quad_back=back_crop.found_quad,
-            crops=(front_crop, back_crop),
-        )
+        return self._predict_probe(front_crop, back_crop)
 
     def _predict_probe(self, front_crop: CardCrop, back_crop: CardCrop) -> GradePrediction:
         from backend.app.ml.grade_head import decode

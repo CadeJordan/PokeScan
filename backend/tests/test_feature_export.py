@@ -60,7 +60,7 @@ def _assert_old_pair_intact(graph, head, snapshot):
         "card_features.json", "card_features.onnx", "grade_head.json", "grade_head.npz",
     ]  # no temp files left behind
     svc = GradeInferenceService(head_path=head, features_path=graph)
-    assert svc.ready and svc.kind == "probe", svc.metadata.get("probe_load_error")
+    assert svc.ready, svc.metadata.get("probe_load_error")
 
 
 def test_export_failing_before_writing_leaves_old_pair_loadable(old_pair, serve_env, monkeypatch):

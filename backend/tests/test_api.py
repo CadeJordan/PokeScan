@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-import backend.app.ml.condition as condition
 from backend.app.api.grade import MAX_BYTES
 
 
@@ -52,15 +51,6 @@ def test_grade_accepts_other_image_types(client, scene_jpeg, content_type):
     assert r.status_code == 200
 
 
-def test_grade_reports_missing_quads_in_notes(client, fake_service, scene_jpeg):
-    fake_service.prediction.found_quad_front = False
-    fake_service.prediction.found_quad_back = False
-    r = client.post("/api/grade", files=_files(scene_jpeg, scene_jpeg))
-    notes = r.json()["notes"]
-    assert any(n.startswith("front:") for n in notes)
-    assert any(n.startswith("back:") for n in notes)
-
-
 def test_grade_rejects_unsupported_type(client, scene_jpeg):
     r = client.post("/api/grade", files=_files(scene_jpeg, b"GIF89a", back_type="image/gif"))
     assert r.status_code == 415
@@ -90,17 +80,14 @@ def test_grade_503_when_model_not_loaded(client, fake_service, scene_jpeg):
     assert fake_service.calls == []
 
 
-def test_unloadable_probe_gives_503_and_health_says_why(
-    tmp_path, serve_env, tiny_legacy_onnx, scene_jpeg, monkeypatch
-):
-    # A real service with no probe files (a legacy model exists, opt-in off).
+def test_unloadable_probe_gives_503_and_health_says_why(tmp_path, serve_env, scene_jpeg, monkeypatch):
+    # A real service with no probe files.
     from fastapi.testclient import TestClient
 
     import backend.app.api.grade as grade_mod
     import backend.app.main as main_mod
     from backend.app.ml.inference import GradeInferenceService
 
-    serve_env(ACTIVE_MODEL_PATH=tiny_legacy_onnx)
     svc = GradeInferenceService(head_path=tmp_path / "grade_head.npz", features_path=tmp_path / "f.onnx")
     monkeypatch.setattr(grade_mod, "get_inference_service", lambda: svc)
     monkeypatch.setattr(main_mod, "get_inference_service", lambda: svc)
@@ -121,15 +108,17 @@ def test_grade_500_on_inference_error(client, fake_service, scene_jpeg):
 
 
 def test_subgrade_failure_does_not_fail_request(client, scene_jpeg, monkeypatch):
+    import backend.app.ml.centering as centering
+
     def boom(*_a, **_k):
         raise ValueError("cv failure")
 
-    monkeypatch.setattr(condition, "compute_condition_subgrades", boom)
+    monkeypatch.setattr(centering, "compute_centering_subgrade", boom)
     r = client.post("/api/grade", files=_files(scene_jpeg, scene_jpeg))
     assert r.status_code == 200
     body = r.json()
-    assert body["sub_grades"]["corners"] is None
-    assert any("unavailable" in n for n in body["notes"])
+    assert body["sub_grades"]["centering"] is None
+    assert body["sub_grades"]["corners"] is not None
 
 
 def test_cors_allows_configured_origin(client):
@@ -141,11 +130,7 @@ def test_cors_allows_configured_origin(client):
     assert r.headers["access-control-allow-origin"] in ("http://localhost:3000", "*")
 
 
-def test_grade_uses_region_grades_from_probe_model(client, fake_service, scene_jpeg, monkeypatch):
-    def boom(*_a, **_k):
-        raise AssertionError("classical condition analysis should not run")
-
-    monkeypatch.setattr(condition, "compute_condition_subgrades", boom)
+def test_grade_uses_region_grades_from_probe_model(client, fake_service, scene_jpeg):
     fake_service.prediction.region_grades = {
         "corners": 9.61, "edges": 8.9, "surface": 7.2, "global": 9.0,
     }
@@ -176,8 +161,7 @@ def test_unmeasurable_centering_is_a_note_not_a_grade(client):
     assert any(n.startswith("centering:") for n in body["notes"])
 
 
-@pytest.mark.parametrize("probe", [True, False], ids=["probe", "legacy"])
-def test_grade_reuses_the_service_crops(client, fake_service, scene_jpeg, monkeypatch, probe):
+def test_grade_reuses_the_service_crops(client, fake_service, scene_jpeg, monkeypatch):
     """Each face is detected once per request: sub-grades reuse the model's crops."""
     import backend.app.ml.centering as centering
     import backend.app.ml.preprocess as preprocess
@@ -186,15 +170,11 @@ def test_grade_reuses_the_service_crops(client, fake_service, scene_jpeg, monkey
     front, back = detect_and_crop(scene_jpeg), detect_and_crop(scene_jpeg)
     front.rotation = 90
     fake_service.prediction.crops = (front, back)
-    if probe:
-        fake_service.prediction.region_grades = dict.fromkeys(
-            ("corners", "edges", "surface", "global"), 9.5
-        )
 
     def boom(*_a, **_k):
         raise AssertionError("detect_and_crop called again")
 
-    for mod in (preprocess, centering, condition):
+    for mod in (preprocess, centering):
         monkeypatch.setattr(mod, "detect_and_crop", boom)
     r = client.post("/api/grade", files=_files(scene_jpeg, scene_jpeg))
     assert r.status_code == 200, r.text

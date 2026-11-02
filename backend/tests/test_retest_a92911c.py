@@ -95,7 +95,7 @@ def test_all_three_agree_loads_without_warning(probe_files, serve_env, caplog):
     _sidecar(feat_path, {"feature_spec_hash": feature_spec_hash(), "exported_at": "x"})
     with caplog.at_level("WARNING", logger="backend.app.ml.inference"):
         svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
-    assert svc.ready and svc.kind == "probe"
+    assert svc.ready
     assert "probe_load_error" not in svc.metadata
     assert not _warned(caplog)
 
@@ -119,7 +119,7 @@ def test_no_hash_head_with_hashless_sidecar_loads_with_warning(
     _sidecar(feat_path, payload)
     with caplog.at_level("WARNING", logger="backend.app.ml.inference"):
         svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
-    assert svc.ready and svc.kind == "probe"
+    assert svc.ready
     assert _warned(caplog)
 
 
@@ -132,7 +132,7 @@ def test_no_hash_head_with_sidecar_matching_code_loads_with_warning(
     _sidecar(feat_path, {"feature_spec_hash": feature_spec_hash()})
     with caplog.at_level("WARNING", logger="backend.app.ml.inference"):
         svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
-    assert svc.ready and svc.kind == "probe"
+    assert svc.ready
     assert _warned(caplog)
 
 
@@ -159,7 +159,7 @@ def test_absent_head_hash_key_still_counts_as_pre_spec(probe_files, serve_env, c
     _save_head(head_path, {"trained_at": "x"})
     with caplog.at_level("WARNING", logger="backend.app.ml.inference"):
         svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
-    assert svc.ready and svc.kind == "probe"
+    assert svc.ready
     assert _warned(caplog)
 
 
@@ -210,14 +210,3 @@ def test_failed_then_successful_load_has_no_stale_error(probe_files, serve_env):
     good = GradeInferenceService(head_path=head_path, features_path=feat_path)
     assert good.ready and "probe_load_error" not in good.metadata
     assert good.metadata == {"feature_spec_hash": feature_spec_hash()}
-
-
-def test_with_opt_in_and_spec_mismatch_legacy_serves_and_error_kept(
-    probe_files, serve_env, tiny_legacy_onnx
-):
-    head_path, feat_path = probe_files
-    serve_env(ALLOW_LEGACY_MODEL=1, ACTIVE_MODEL_PATH=tiny_legacy_onnx)
-    _save_head(head_path, {"feature_spec_hash": feature_spec_hash()})  # no sidecar
-    svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
-    assert svc.ready and svc.kind == "legacy"
-    assert "f.json missing" in svc.metadata["probe_load_error"]

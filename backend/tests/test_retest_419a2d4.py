@@ -36,7 +36,7 @@ pair = _pair_fixture
 
 def _ready_service(head_path, feat_path) -> GradeInferenceService:
     svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
-    assert svc.kind == "probe" and svc.ready, svc.metadata.get("probe_load_error")
+    assert svc.ready, svc.metadata.get("probe_load_error")
     return svc
 
 
@@ -129,7 +129,7 @@ def test_guard_is_safe_under_concurrent_requests(tmp_path, pair):
 # Fail open: more load-error paths
 # --------------------------------------------------------------------------- #
 def _assert_fails_open(svc, expected: str):
-    assert svc.ready and svc.kind == "probe" and svc.probe_load_error is None
+    assert svc.ready and svc.probe_load_error is None
     assert svc._guard is None
     assert expected in svc.metadata["face_guard_load_error"]
     assert svc.metadata["face_guard"]["loaded"] is False
@@ -188,15 +188,6 @@ def test_guard_loads_with_no_enabled_checks_and_does_nothing(probe_files, serve_
     svc._extractor = SeqExtractor(_feats(side=(10.0, -10.0), flip=(10.0, 10.0)))
     pred = svc.predict(*pair)
     assert pred.notes == [] and svc._extractor.calls == 1
-
-
-def test_explicit_legacy_model_ignores_a_guard_file(tmp_path, serve_env, tiny_legacy_onnx):
-    _save_guard(tmp_path / "grade_head.npz")
-    svc = GradeInferenceService(
-        model_path=tiny_legacy_onnx, head_path=tmp_path / "grade_head.npz"
-    )
-    assert svc.kind == "legacy"
-    assert "face_guard" not in svc.metadata and "face_guard_load_error" not in svc.metadata
 
 
 def test_guard_stat_error_never_makes_the_probe_unready(probe_files, serve_env, monkeypatch):

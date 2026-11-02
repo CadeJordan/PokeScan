@@ -159,23 +159,6 @@ def update_factor_subgrades(
     )
 
 
-def factor_label_coverage(conn: sqlite3.Connection) -> dict[str, int]:
-    """Return counts of pokemon certs with/without precomputed factor labels."""
-    total = int(
-        conn.execute(
-            "SELECT COUNT(*) FROM certs WHERE is_pokemon=1 AND has_images=1 "
-            "AND front_path IS NOT NULL AND back_path IS NOT NULL"
-        ).fetchone()[0]
-    )
-    labeled = int(
-        conn.execute(
-            "SELECT COUNT(*) FROM certs WHERE is_pokemon=1 AND has_images=1 "
-            "AND corners_subgrade IS NOT NULL"
-        ).fetchone()[0]
-    )
-    return {"total": total, "labeled": labeled, "missing": total - labeled}
-
-
 def update_precrop_paths(
     conn: sqlite3.Connection,
     cert_number: str,

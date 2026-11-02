@@ -243,7 +243,7 @@ def test_no_guard_file_is_bit_identical_to_the_head(probe_files, serve_env, pair
     head_path, feat_path = probe_files
     _save_head(head_path, D)
     svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
-    assert svc.kind == "probe" and svc._guard is None
+    assert svc.ready and svc._guard is None
     assert "face_guard" not in svc.metadata and "face_guard_load_error" not in svc.metadata
     feats = _feats(side=(10.0, -10.0), flip=(10.0, 10.0))  # would trigger every check
     svc._extractor = SeqExtractor(feats)
@@ -379,7 +379,7 @@ def test_untrusted_guard_is_disabled_and_api_stays_ready(
         _break_guard(_save_guard(head_path), problem)
     with caplog.at_level(logging.WARNING, logger="backend.app.ml.inference"):
         svc = GradeInferenceService(head_path=head_path, features_path=feat_path)
-    assert svc.kind == "probe" and svc.ready
+    assert svc.ready
     assert svc.probe_load_error is None and "probe_load_error" not in svc.metadata
     assert svc._guard is None
     err = svc.metadata["face_guard_load_error"]

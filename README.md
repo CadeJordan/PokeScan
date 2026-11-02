@@ -6,7 +6,7 @@ This project is independent and not affiliated with PSA or eBay. Respect each pl
 
 ## What it does
 
-1. **Detect & dewarp** — normalises the upload like the training photos (upright per its EXIF orientation, at most 1024 px on the long edge), finds the card in the photo (including slab shots) and warps it to a 600×840 canvas. If no card outline is found in a landscape photo, it retries once with the photo turned 90°, so a sideways shot is still found (possibly upside down). Portrait photos aren't retried, since the turned search finds false outlines on them, so a sideways card inside a portrait photo isn't found. Failing that, `/api/grade` returns 422 "card not found; retake the photo on a plain background" (with the legacy model, the whole photo is padded onto the canvas and graded, with a note).
+1. **Detect & dewarp** — normalises the upload like the training photos (upright per its EXIF orientation, at most 1024 px on the long edge), finds the card in the photo (including slab shots) and warps it to a 600×840 canvas. If no card outline is found in a landscape photo, it retries once with the photo turned 90°, so a sideways shot is still found (possibly upside down). Portrait photos aren't retried, since the turned search finds false outlines on them, so a sideways card inside a portrait photo isn't found. Failing that, `/api/grade` returns 422 "card not found; retake the photo on a plain background".
 2. **Region features** — a frozen DINOv2 ViT-B (self-supervised, not fine-tuned) summarises each face as 11 vectors: CLS, mean, 4 corners, 4 edge strips, centre.
    - **Face guard** (when `data/models/face_guard.npz` is trained) — small probes on those features check that the front photo is a front, the back a back, and that each is upright. Swapped photos are graded the other way round and an upside-down face is rotated and re-read, each with a note; two photos of the same side get a 422 (see [Face guard](#face-guard)).
 3. **Overall grade** — linear proportional-odds (ordinal) probes over the corner, edge, centre and global features of both faces, stacked into one ordinal model.
@@ -29,9 +29,8 @@ Why not the end-to-end CNN any more: with ~2.6k labelled certs (87% grade 9–10
 fine-tuning ConvNeXt end to end collapsed towards a constant grade and scored
 below "always predict 10". Frozen features + linear probes can't collapse that
 way, refit in seconds, and the per-region probes give sub-grades that actually
-track the grade. The API serves only the probe model; the legacy CNN
-(`grade_model.onnx`) loads only with `ALLOW_LEGACY_MODEL=1` or an explicit
-`--model-path`. See `docs/adr/0001-frozen-features-linear-probes.md`.
+track the grade. The CNN and its training code were removed on 2026-11-01
+(`intent/retire-legacy-model`); see `docs/adr/0001-frozen-features-linear-probes.md`.
 
 ## Repo layout
 
@@ -40,11 +39,12 @@ PokeScan/
   backend/              FastAPI inference service
     app/
       api/              HTTP endpoints (POST /grade, GET /health)
-      ml/               Inference, preprocessing, centering, condition analysis
+      ml/               Inference, preprocessing, features, grade head, face guard, centering
       core/             Config (pydantic-settings)
   ml/                   Offline training
-    data/               PSA / eBay collectors, SQLite, PyTorch Dataset
-    training/           Lightning loop, CORN loss, export to ONNX
+    data/               PSA / eBay collectors, SQLite, split, precrop
+    training/           Probe head and face guard training (feature graph export to ONNX)
+    eval/               End-to-end evaluation of the served pipeline
   frontend/             Next.js app (upload UI, grade display)
   data/                 Local images, SQLite, model artifacts (gitignored by default)
   pyproject.toml
@@ -95,7 +95,7 @@ Edit `.env` with your credentials and paths:
 | `PSA_API_TOKEN` or `PSA_API_TOKEN0`…`PSA_API_TOKEN5` | PSA Public API bearer token(s). Use numbered tokens for multi-token daily rotation. |
 | `EBAY_APP_ID`, `EBAY_CERT_ID` | eBay Browse API (primary bulk training source). |
 | `DATA_DIR`, `IMAGES_DIR`, `DB_PATH` | Where harvested images and SQLite metadata live. |
-| `ACTIVE_MODEL_PATH` | ONNX file loaded by the API (default `./data/models/grade_model.onnx`). |
+| `GRADE_HEAD_PATH`, `FEATURE_MODEL_PATH` | Probe model files loaded by the API (defaults `data/models/grade_head.npz`, `data/models/card_features.onnx`); a `face_guard.npz` next to the head is loaded too. |
 | `CORS_ORIGINS` | Frontend origin(s), default `http://localhost:3000`. |
 
 **PSA token:** https://www.psacard.com/publicapi/documentation  
@@ -127,7 +127,7 @@ NEXT_PUBLIC_API_BASE=http://localhost:8000/api
 
 You need a trained probe model (`python -m ml.training.train_probe`) before `/grade` works: `data/models/grade_head.npz` (+ `grade_head.json`) and `card_features.onnx` (+ `card_features.json`). If none exists yet, skip to [Train a model](#train-a-model) or the health check will report `model_loaded: false`.
 
-The API fails closed: if a probe file is missing or doesn't load (corrupt, or head, feature graph and the running code on different feature specs), `/api/grade` returns 503 and `/api/health` shows `model_loaded: false` with the reason in `metadata.probe_load_error`. It never silently serves the legacy CNN, which scores worse than always predicting 10. Set `ALLOW_LEGACY_MODEL=1` (env or `.env`) to fall back to the legacy model at `ACTIVE_MODEL_PATH` instead, e.g. to serve a `smoke.yaml` end-to-end run; the error stays in the health metadata. Artifacts trained before the feature-spec check (no `card_features.json`, no `feature_spec_hash` in `grade_head.json`) still load, with a WARNING.
+The API fails closed: if a probe file is missing or doesn't load (corrupt, or head, feature graph and the running code on different feature specs), `/api/grade` returns 503 and `/api/health` shows `model_loaded: false` with the reason in `metadata.probe_load_error`. Artifacts trained before the feature-spec check (no `card_features.json`, no `feature_spec_hash` in `grade_head.json`) still load, with a WARNING.
 
 ### 1. Start the API
 
@@ -198,7 +198,6 @@ and re-crop so the new certs are usable:
 python -m ml.data.ebay_collect --grades 1 2 3 4 5 6 7 8 --per-grade 300
 python -m ml.data.split          # sticky: only new certs are placed; eBay goes to train
 python -m ml.data.precrop        # crops only the new certs (add --force to rebuild all)
-python -m ml.data.precompute_factors   # only if you train multitask.yaml
 ```
 
 `split.py` is **sticky** by default: a cert that already has a split keeps it,
@@ -249,7 +248,7 @@ Both skip certs already collected with images, without any PSA call (the log say
 
 ## Train a model
 
-### Probe model (default)
+### Probe model
 
 ```powershell
 python -m ml.data.split
@@ -336,136 +335,12 @@ are enabled. Retrain it whenever the feature spec changes. What it does to a req
   face). `/api/grade` refuses those uploads with 422 anyway; `ml.eval` still reports
   their P(flipped).
 
-Restart the API afterwards. The rest of this section is the legacy end-to-end
-CNN, which the API serves only with `ALLOW_LEGACY_MODEL=1` (or through
-`ml.eval.evaluate --model-path`).
-
-### Legacy CNN: MVP (overall grade only)
-
-```powershell
-python -m ml.data.split
-python -m ml.data.precrop
-python -m ml.training.train --config ml/training/configs/mvp.yaml
-python -m ml.training.export --checkpoint data/models/checkpoints/best-XX.ckpt
-```
-
-### Legacy CNN: multi-task (grade + corners/edges/surface)
-
-Classical-CV pseudo-labels from the condition module supervise auxiliary factor
-heads alongside the CORN grade head. The API still serves factor sub-grades from
-classical CV at inference; the multitask heads improve the shared backbone.
-
-```powershell
-python -m ml.data.split
-python -m ml.data.precrop              # one-time dewarp to data/crops/ (speeds training)
-python -m ml.data.precompute_factors
-python -m ml.training.train --config ml/training/configs/multitask.yaml
-python -m ml.training.export --checkpoint data/models/checkpoints/best-XX.ckpt
-```
-
-Run `precrop` again after harvesting new certs (`--force` to rebuild all).
-Training configs default to `use_precrop: true` and skip live `detect_and_crop`.
-
-The export step writes `data/models/grade_model.onnx` (or the path in
-`ACTIVE_MODEL_PATH`). Restart the API with `ALLOW_LEGACY_MODEL=1` to serve it
-(only when no probe model loads); this is also how to serve the `smoke.yaml`
-end-to-end check (train -> checkpoint -> export -> serve).
-
-### Training knobs (all configs)
-
-| Key | Default | Meaning |
-|---|---|---|
-| `sampler_power` | `0.5` | Sampler weights `count(grade) ** -power`. `0` = natural distribution, `0.5` = `1/sqrt(count)`, `1` = full inverse frequency (the old behaviour; draws the single grade-1 card ~1000x more than a 10 and biases the model low). Only used when `balanced_sampler: true`. |
-| `aug_strength` | `1.0` | Scales the lighting/colour augmentation (brightness, contrast, gamma, white balance, small hue shift, rare mild CLAHE). `0` turns it off. No blur, noise, scratches or crops, ever. |
-| `monitor` / `monitor_mode` | `val/qwk` / `max` | Metric for checkpointing and early stopping. MAE rewards always predicting 10; QWK does not. Checkpoints are named `best-EE-qwk0.XXX.ckpt`. |
-| `run_name` | unset | Sub-folder for checkpoints (`data/models/checkpoints/<run_name>/`) and CSV logs. |
-
-`train.py` also takes `--sampler-power`, `--aug-strength` and `--run-name` to
-override the config from the command line.
-
-### Calibration: temperature + threshold offsets
-
-`export.py` fits two things on the val split and bakes both into the graph as
-`corn_logits = logits / T + b`, so the API and `/api/health` need no changes:
-
-1. a temperature `T` (minimises val NLL, so confidences are calibrated), and
-2. nine per-threshold offsets `b` (coordinate search that minimises val
-   `MAE - QWK`; `--offset-objective mae|qwk` to change). This removes
-   systematic grade bias without retraining. `T` is then re-fitted on the
-   offset logits; that never changes a hard grade.
-
-Both values and the val metrics before/after go into `grade_model.json`
-(`temperature`, `threshold_offsets`, `val_metrics_temperature_only`,
-`val_metrics_calibrated`). Flags: `--no-fit-offsets` (temperature only),
-`--offsets-json <file>` (re-use offsets from an earlier `grade_model.json` or
-calibration JSON), `--calibration-only` (fit and report, write nothing under
-`data/models/`), `--no-activate` (export to `--out-onnx` without replacing the
-served model).
-
-**Quick win: re-export the current checkpoint with offsets** (no retraining):
-
-```powershell
-# 1. Preview: fit on val, print MAE/QWK/bias before -> after, write nothing under data/models/
-python -m ml.training.export --checkpoint data/models/checkpoints/best-14-0.863.ckpt --calibration-only --calibration-out test-artifacts/calibration_v4.json
-
-# 2. Export side by side and evaluate it on test before promoting it
-python -m ml.training.export --checkpoint data/models/checkpoints/best-14-0.863.ckpt `
-  --out-onnx data/models/candidates/v4_offsets.onnx --out-torchscript data/models/candidates/v4_offsets.pt --no-activate
-python -m ml.eval.evaluate --split test --model-path data/models/candidates/v4_offsets.onnx --out-dir test-artifacts/eval/v4_offsets
-
-# 3. Promote it if it wins (or re-run step 2 without --no-activate), then restart the API
-python -m ml.training.export --checkpoint data/models/checkpoints/best-14-0.863.ckpt --offsets-json data/models/candidates/v4_offsets.json
-```
-
-Do the same with the single-task v3 checkpoint (`best-03-0.668.ckpt`).
-
-### Experiment matrix
-
-Run each configuration on the same clean crops (Step 1 done, `precrop --force`
-run). Pick the winner by **val** QWK, then confirm it on **test**. It must beat
-always-predict-10 on MAE (0.66 on the current test split).
-
-| Run | Config | `sampler_power` |
-|---|---|---|
-| `mvp_sp0` | `mvp.yaml` | 0 |
-| `mvp_sp05` | `mvp.yaml` | 0.5 |
-| `mvp_sp1` | `mvp.yaml` | 1 |
-| `mt_sp0` | `multitask.yaml` | 0 |
-| `mt_sp05` | `multitask.yaml` | 0.5 |
-| `mt_sp1` | `multitask.yaml` | 1 |
-
-```powershell
-# Train (use mvp_8gb.yaml instead of mvp.yaml on an 8 GB GPU)
-foreach ($p in 0, 0.5, 1) {
-  $tag = "$p".Replace(".", "")
-  python -m ml.training.train --config ml/training/configs/mvp.yaml       --sampler-power $p --run-name "mvp_sp$tag"
-  python -m ml.training.train --config ml/training/configs/multitask.yaml --sampler-power $p --run-name "mt_sp$tag"
-}
-
-# Export each run's best checkpoint (highest qwk in the file name) side by side
-foreach ($run in "mvp_sp0", "mvp_sp05", "mvp_sp1", "mt_sp0", "mt_sp05", "mt_sp1") {
-  $ckpt = Get-ChildItem "data/models/checkpoints/$run/best-*.ckpt" |
-    Sort-Object { [double][regex]::Match($_.Name, 'qwk(-?\d+\.\d+)').Groups[1].Value } |
-    Select-Object -Last 1
-  python -m ml.training.export --checkpoint $ckpt.FullName `
-    --out-onnx "data/models/candidates/$run.onnx" --out-torchscript "data/models/candidates/$run.pt" --no-activate
-  python -m ml.eval.evaluate --split val --no-robustness --model-path "data/models/candidates/$run.onnx" --out-dir "test-artifacts/eval/$run-val"
-}
-
-# Winner: full test evaluation, promote it, and pin it as the regression baseline
-python -m ml.eval.evaluate --split test --model-path data/models/candidates/<winner>.onnx --out-dir test-artifacts/eval/<winner>
-python -m ml.training.export --checkpoint <winner checkpoint> --offsets-json data/models/candidates/<winner>.json
-python -m ml.eval.evaluate --split test --save-baseline
-```
-
-Each run's CSV log (`data/models/logs/<run>/version_*/metrics.csv`) has
-`val/qwk`, `val/mae` and `test/qwk` per epoch if you want to plot the runs.
+Restart the API afterwards.
 
 ## Evaluate
 
 ```powershell
 python -m ml.eval.evaluate --split test                 # full report + charts in test-artifacts/eval/
-python -m ml.eval.evaluate --split test --tta           # average over hflip + dim/bright copies
 python -m ml.eval.evaluate --split test --n-boot 2000   # tighter CI estimates (default 1000; 0 = off)
 python -m ml.eval.evaluate --split test --perturbations rotate_180,swap_faces  # only these robustness runs
 ```
@@ -482,10 +357,7 @@ run lists every cert's `notes` and `guard` probabilities.
 The report includes 95% bootstrap CIs for MAE, QWK, exact and bias, plus a
 per-grade table with a Wilson CI on recall and a bootstrap CI on MAE. Low
 grades with a handful of test cards show very wide intervals; don't read much
-into them. `--tta` only affects the evaluation; the API default is unchanged
-(`GradeInferenceService(tta=True)` turns it on in code). TTA applies to the
-legacy CNN only: with the probe model it raises an error rather than being
-silently ignored, so pass `--model-path` to evaluate the legacy model with it.
+into them.
 
 **Raw (unslabbed) cards.** Every training photo is through PSA plastic. Before
 trusting the model on raw cards, build a separate labelled set (e.g. from eBay
@@ -530,10 +402,8 @@ trained on. If the DB can't be read every cert is `unknown`, never `absent`. Pro
 
 ## Caveats
 
-- PSA grades are imbalanced (9 and 10 dominate); training uses stratified sampling and CORN ordinal loss.
-- Augmentations that change apparent condition (scratches, heavy rotation, edge crops) are **not** applied.
-- Classical condition sub-grades are conservative heuristics calibrated on slab photos; they ship interpretable scores today and can be swapped for learned heads later.
-- Condition **whitening** on corners is limited at slab-photo resolution; corner grades lean on geometry (rounding / jaggedness).
+- PSA grades are imbalanced (9 and 10 dominate); the probes are proportional-odds (ordinal) models evaluated with card-grouped CV.
+- Corner / edge / surface sub-grades are learned from overall grades, not PSA sub-grades, so they move closely together (ADR 0001).
 
 ## Development
 
@@ -559,7 +429,7 @@ pytest
 | 400 | Empty upload, or not a readable image (corrupt, truncated, not an image, or not a JPEG, PNG or WebP whatever its declared content type). Once a photo opens, a malformed EXIF block is ignored: the photo is graded with its orientation applied if that can be read, else as upright. Rarely, a JPEG whose EXIF makes the image library fail to open it (e.g. a one-value XResolution) is refused as unreadable |
 | 413 | Image over 12 MB |
 | 415 | Content type isn't JPEG, PNG or WebP |
-| 422 | Probe model: no card outline found on a face ("card not found; retake the photo on a plain background"), or the face guard reads both photos as backs (or both as fronts). Also a missing `front`/`back` field |
+| 422 | No card outline found on a face ("card not found; retake the photo on a plain background"), or the face guard reads both photos as backs (or both as fronts). Also a missing `front`/`back` field |
 | 503 | No grade model loaded (`/api/health` says why) |
 
 

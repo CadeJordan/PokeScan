@@ -4,9 +4,9 @@ a face with no card outline or a same-side pair (probe model only).
 Adversarial edges the developer's `test_reject_uploads.py` doesn't cover:
 decode errors PIL raises as something other than `OSError`, face naming after
 a guard swap combined with both-fallback / flip, precedence across the three
-cases, the side threshold boundary, non-decode errors that must stay 500, the
-legacy service end to end, and `ml.eval` with old-style rows, predictions
-without `rejection` and `--exclude-fallback`.
+cases, the side threshold boundary, non-decode errors that must stay 500, and
+`ml.eval` with old-style rows, predictions without `rejection` and
+`--exclude-fallback`.
 
 Synthetic images, stub services/guards and tmp_path only; nothing under data/
 is read or written.
@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from backend.app.ml.face_guard import NOTE_BOTH, NOTE_SWAPPED
-from backend.app.ml.inference import GradeInferenceService, GradePrediction
+from backend.app.ml.inference import GradePrediction
 from backend.app.ml.preprocess import ImageDecodeError, decode_image, detect_and_crop
 from backend.tests.test_face_guard import THRESHOLDS, _feats, _guard, _logit, _service
 from backend.tests.test_face_guard import pair as _pair_fixture
@@ -378,33 +378,12 @@ def test_rejection_wording_is_exactly_the_spec(fields, expected):
     assert _probe_prediction(**fields).rejection() == expected
 
 
-def test_rejection_leaves_a_legacy_swapped_or_same_side_prediction_alone():
-    for fields in (dict(swapped=True, found_quad_back=False), dict(same_side="front")):
-        assert _probe_prediction(region_grades=None, **fields).rejection() is None
-
-
 def test_new_fields_take_part_in_equality_but_crops_still_dont(pair):
     a = _probe_prediction()
     assert a == _probe_prediction(crops=(detect_and_crop(pair[0]), detect_and_crop(pair[1])))
     assert a != dataclasses.replace(a, same_side="back")
     assert a != dataclasses.replace(a, swapped=True)
     assert "same_side=None" in repr(a) and "crops" not in repr(a)
-
-
-# --------------------------------------------------------------------------- #
-# Legacy service end to end: never rejected
-# --------------------------------------------------------------------------- #
-def test_legacy_service_grades_a_fallback_face_with_the_note(
-    tiny_legacy_onnx, serve_env, pair, blank, monkeypatch
-):
-    svc = GradeInferenceService(model_path=tiny_legacy_onnx)
-    assert svc.kind == "legacy" and svc.ready
-    pred = svc.predict(blank, pair[1])
-    assert pred.region_grades is None and not pred.found_quad_front
-    assert pred.rejection() is None and not pred.swapped and pred.same_side is None
-    r = _post(svc, monkeypatch, blank, pair[1])
-    assert r.status_code == 200, r.text
-    assert "front: card outline not auto-detected; used center-padded fallback" in r.json()["notes"]
 
 
 # --------------------------------------------------------------------------- #

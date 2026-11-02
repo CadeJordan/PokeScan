@@ -12,7 +12,6 @@ import numpy as np
 import pytest
 
 import backend.app.ml.centering as centering_mod
-from backend.app.ml import condition
 from backend.app.ml.centering import (
     CenteringResult,
     _grade_from_ratio,
@@ -195,8 +194,7 @@ def tiny_feature_onnx(tmp_path_factory):
     return path
 
 
-def test_selection_head_only_is_not_ready(tmp_path, serve_env, tiny_legacy_onnx):
-    serve_env(ACTIVE_MODEL_PATH=tiny_legacy_onnx)  # fails closed although a legacy model exists
+def test_selection_head_only_is_not_ready(tmp_path, serve_env):
     head = tmp_path / "h.npz"
     _head().save(head)
     svc = GradeInferenceService(
@@ -206,36 +204,17 @@ def test_selection_head_only_is_not_ready(tmp_path, serve_env, tiny_legacy_onnx)
     assert svc.metadata == {"probe_load_error": "FileNotFoundError: missing.onnx"}
 
 
-def test_selection_head_only_with_legacy_opt_in_is_legacy(tmp_path, serve_env, tiny_legacy_onnx):
-    serve_env(ACTIVE_MODEL_PATH=tiny_legacy_onnx, ALLOW_LEGACY_MODEL=1)
-    head = tmp_path / "h.npz"
-    _head().save(head)
-    svc = GradeInferenceService(head_path=head, features_path=tmp_path / "missing.onnx")
-    assert svc.kind == "legacy" and svc.ready
-    assert svc.metadata["probe_load_error"] == "FileNotFoundError: missing.onnx"
-
-
-def test_selection_features_only_is_not_ready(tmp_path, tiny_feature_onnx, serve_env, tiny_legacy_onnx):
-    serve_env(ACTIVE_MODEL_PATH=tiny_legacy_onnx)
+def test_selection_features_only_is_not_ready(tmp_path, tiny_feature_onnx, serve_env):
     svc = GradeInferenceService(head_path=tmp_path / "missing.npz", features_path=tiny_feature_onnx)
     assert not svc.ready
     assert svc.metadata == {"probe_load_error": "FileNotFoundError: missing.npz"}
-
-
-def test_selection_features_only_with_legacy_opt_in_is_legacy(
-    tmp_path, tiny_feature_onnx, serve_env, tiny_legacy_onnx
-):
-    serve_env(ACTIVE_MODEL_PATH=tiny_legacy_onnx, ALLOW_LEGACY_MODEL=1)
-    svc = GradeInferenceService(head_path=tmp_path / "missing.npz", features_path=tiny_feature_onnx)
-    assert svc.kind == "legacy" and svc.ready
-    assert svc.metadata["probe_load_error"] == "FileNotFoundError: missing.npz"
 
 
 def test_selection_both_is_probe_and_predicts(tmp_path, tiny_feature_onnx):
     head_path = tmp_path / "h.npz"
     _head(metadata={"kind": "dinov2_region_probe", "n_fit": 3}).save(head_path)
     svc = GradeInferenceService(head_path=head_path, features_path=tiny_feature_onnx)
-    assert svc.kind == "probe" and svc.ready
+    assert svc.ready
     assert svc.metadata == {"kind": "dinov2_region_probe", "n_fit": 3}
     jpeg = to_jpeg_bytes(make_scene(seed=1).bgr)
     a = svc.predict(jpeg, jpeg)
@@ -247,17 +226,6 @@ def test_selection_both_is_probe_and_predicts(tmp_path, tiny_feature_onnx):
     assert all(x >= y for x, y in zip(a.rank_probs, a.rank_probs[1:], strict=False))
     assert set(a.region_grades) == set(PROBE_NAMES)
     assert all(1.0 <= g <= 10.0 for g in a.region_grades.values())
-
-
-def test_selection_explicit_model_path_forces_legacy(tmp_path, tiny_feature_onnx):
-    head_path = tmp_path / "h.npz"
-    _head().save(head_path)
-    svc = GradeInferenceService(
-        model_path=tmp_path / "legacy.onnx", head_path=head_path, features_path=tiny_feature_onnx
-    )
-    assert svc.kind == "legacy"
-    assert svc.model_path == tmp_path / "legacy.onnx"
-    assert not svc.ready  # legacy file missing -> 503, not a silent probe
 
 
 def test_corrupt_head_sidecar_does_not_crash_startup(tmp_path, tiny_feature_onnx):
@@ -466,21 +434,6 @@ def test_subgrade_worse_face_wins(monkeypatch, card_jpeg):
 # --------------------------------------------------------------------------- #
 # API contract with the fake service
 # --------------------------------------------------------------------------- #
-def test_api_region_grades_none_uses_classical(client, fake_service, scene_jpeg, monkeypatch):
-    called = []
-    real = condition.compute_condition_subgrades
-
-    def spy(*a, **k):
-        called.append(1)
-        return real(*a, **k)
-
-    monkeypatch.setattr(condition, "compute_condition_subgrades", spy)
-    assert fake_service.prediction.region_grades is None
-    r = client.post("/api/grade", files=_files(scene_jpeg, scene_jpeg))
-    assert r.status_code == 200
-    assert called
-
-
 @pytest.mark.parametrize(
     ("grade", "hint", "flags"),
     [
@@ -654,7 +607,7 @@ def test_real_service_on_raw_images_sane_and_deterministic():
         pytest.skip("raw images missing")
     pick = [rows[i] for i in np.random.default_rng(0).choice(len(rows), min(4, len(rows)), replace=False)]
     svc = GradeInferenceService()
-    assert svc.kind == "probe"
+    assert svc.ready, svc.metadata.get("probe_load_error")
     errors = []
     for grade, fp, bp in pick:
         fb, bb = (s.data_dir / fp).read_bytes(), (s.data_dir / bp).read_bytes()

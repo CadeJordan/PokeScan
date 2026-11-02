@@ -1,4 +1,4 @@
-"""Training never sees raw slab photos: load_records filtering + train guard.
+"""Training never sees raw slab photos: load_records and train_probe.load_rows filtering.
 
 Raw PSA slab photos print the grade on the label, so a cert whose precrop is
 missing or was cut without a detected card outline must be dropped, never
@@ -100,35 +100,15 @@ def test_precrop_coverage(db):
 
 
 # --------------------------------------------------------------------------- #
-# train.py guard
+# train_probe.load_rows: the probe trains on usable precrops only
 # --------------------------------------------------------------------------- #
-def test_train_guard_rejects_raw_photos():
-    from ml.training.train import check_training_inputs
+def test_probe_training_rows_are_usable_precrops_only(db):
+    from ml.training.train_probe import load_rows
 
-    with pytest.raises(SystemExit, match="raw slab photos"):
-        check_training_inputs(use_precrop=False, crop_card=False)
-
-
-@pytest.mark.parametrize("kept,total,ok", [(90, 100, True), (89, 100, False), (0, 0, False)])
-def test_train_guard_coverage(monkeypatch, kept, total, ok):
-    from ml.training import train
-
-    monkeypatch.setattr(train, "precrop_coverage", lambda split, kinds=None: (kept, total))
-    if ok:
-        train.check_training_inputs(use_precrop=True, crop_card=False)
-    else:
-        with pytest.raises(SystemExit, match="usable precrop"):
-            train.check_training_inputs(use_precrop=True, crop_card=False)
-
-
-def test_train_guard_skips_coverage_for_on_the_fly_crops(monkeypatch):
-    from ml.training import train
-
-    def boom(*a, **k):
-        raise AssertionError("coverage should not be checked")
-
-    monkeypatch.setattr(train, "precrop_coverage", boom)
-    train.check_training_inputs(use_precrop=False, crop_card=True)
+    rows = load_rows(db.db_path)
+    # Cut on a detected outline with both crop paths recorded; never a raw photo.
+    assert {r["cert_number"] for r in rows} == {"ok_card", "ok_well", "file_missing"}
+    assert all(r["cropped_front_path"] and r["cropped_back_path"] for r in rows)
 
 
 # --------------------------------------------------------------------------- #

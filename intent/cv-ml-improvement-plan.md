@@ -9,6 +9,7 @@ Specs written from this plan:
 - [[face-side-orientation-guard]]: item 6
 - [[reject-unusable-uploads]]: item 7 (open question 2) and the guard's same-side case
 - [[tighter-slab-crops]]: item 8
+- [[retire-legacy-model]]: item 11 (open question 3, second half)
 
 Small fixes found in the review are in `intent/smallfix.md` §10.
 
@@ -153,13 +154,14 @@ Ranked by impact over effort. Effort: S < ½ day, M = 1–2 days, L > 3 days.
   - So the UI shows three independent-looking sub-grades that are really one number. ADR 0001 says this ("move closely together"), but the UI doesn't.
 - **Impact:** medium (user trust), low (accuracy). **Effort:** S for a copy change, L for real sub-grades, which need labels. **Dependencies:** open question 4.
 
-### 11. Retire the legacy CNN path and the Phase C hooks
+### 11. Retire the legacy CNN path and the Phase C hooks (spec: [[retire-legacy-model]], done 2026-11-01)
 
 - **Problem:**
   - `model.py`, `multitask.py`, `calibrate.py`, `export.py`, `train.py`, `lightning_module.py` and the classical `condition.py` sub-grades (Spearman −0.05 to 0.02 with grade, ADR 0001) only serve a model that is worse than always-10.
   - `defects.py` is imported nowhere, and its docstring says the API "returns an empty defect list", which has no API field.
   - [[corn-decode-verification]] only matters for this path.
-- **Impact:** low on accuracy, medium on maintenance and confusion. **Effort:** M. **Dependencies:** open question 3. Not specced.
+- **Impact:** low on accuracy, medium on maintenance and confusion. **Effort:** M. **Dependencies:** open question 3.
+- **Done (2026-11-01):** [[retire-legacy-model]] removed the CNN's serving path (`model_path`, TTA, `ALLOW_LEGACY_MODEL`, the classical sub-grade fallback), its training/export/calibration code, `condition.py`, `defects.py`, `multitask.py`, `precompute_factors.py` and `export_for_annotation.py`. The 20 `/api/grade` responses and the val eval predictions are identical before and after. The CNN's files moved to `data/backups/legacy-cnn-2026-11-01/`; [[corn-decode-verification]] is closed as won't-do.
 
 ### 12. Resolution ceiling on 9 vs 10
 
@@ -188,7 +190,7 @@ Ranked by impact over effort. Effort: S < ½ day, M = 1–2 days, L > 3 days.
 | 9 | Card-grouped test split + re-baseline (9) | improvement | medium | S + retrain | [[stable-grouped-split]] phase 2 (Q1) |
 | 10 | Sub-grade presentation (10) | improvement | medium (trust) | S–L | decision (Q4) |
 | 11 | Phone-photo evaluation set (13) | improvement | high (knowledge) | M owner time | decision (Q8) |
-| 12 | Retire legacy path (11) | cleanup | low–medium | M | decision (Q3) |
+| 12 | Retire legacy path (11) | cleanup | low–medium | M | [[retire-legacy-model]] (done 2026-11-01) |
 | 13 | Tighter crops for well/small (8) | improvement | low–medium | M | none yet |
 | 14 | Higher-resolution region features (12) | improvement | measured: none for frozen DINOv2 tiles (pilot call: stop) | L | [[full-resolution-pilot]] |
 
@@ -212,6 +214,7 @@ Suggested order: 1–2 and 4 in parallel (they touch different files), then 3, t
 
    *Recommendation:* (a) for the probe model, after [[serve-input-normalization]] lands and fallbacks are rare. Grades from padded whole photos are out of distribution, and today they look exactly like real grades.
 3. **Legacy model:** fail closed (503) when the probe can't load, instead of serving the collapsed CNN? And retire the legacy path (item 11), closing [[corn-decode-verification]] as won't-do? *Recommendation:* fail closed now, with an `ALLOW_LEGACY_MODEL=1` env opt-in. Retire the code in a follow-up spec.
+   **Closed (2026-11-01):** fail-closed shipped with [[probe-artifact-consistency]]; the legacy path, including the `ALLOW_LEGACY_MODEL` opt-in, was removed in [[retire-legacy-model]], and [[corn-decode-verification]] is closed as won't-do.
 4. **Sub-grades:** keep three numbers that measure the same thing, show one "condition" estimate, or keep the fields and reword the UI ("what this region suggests about the overall grade")? Real sub-grades need labels, e.g. BGS-graded listings with sub-grades from eBay. *Recommendation:* keep the API fields (no contract change), reword the UI hints now, and decide about BGS data separately.
 5. **Re-fetch full-resolution PSA originals** (from the `front_url`/`back_url` already in the DB) for a resolution experiment? It's ~20 GB for all certs. I assume it doesn't consume PSA API quota, but that's unverified. *Recommendation:* a 200-cert pilot first.
 6. **Compute for [[face-side-orientation-guard]]:** one GPU feature extraction of ~5.2k 180°-rotated crops (minutes) and a new `data/models/face_guard.npz`. OK? *Recommendation:* yes.
