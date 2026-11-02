@@ -1,6 +1,6 @@
 """Full-resolution pilot: does more resolution separate PSA 9 from 10?
 
-Spec: `intent/full-resolution-pilot/intent.md`. Three arms on the same certs
+Spec: `intent/archive/full-resolution-pilot/intent.md`. Three arms on the same certs
 and card-grouped folds; only the corner and edge region features differ (CLS,
 mean and centre are today's features in every arm):
 
@@ -1623,7 +1623,7 @@ def evaluate(
     report = {
         "generated_at": _now(),
         "git_commit": git_commit(),
-        "spec": "intent/full-resolution-pilot/intent.md",
+        "spec": "intent/archive/full-resolution-pilot/intent.md",
         "tile_spec": spec.to_dict(),
         "tile_spec_hash": spec.hash(),
         "cv": {"folds": folds, "seed": 0, "head": "probe.cross_validate (whole head refit per arm)"},

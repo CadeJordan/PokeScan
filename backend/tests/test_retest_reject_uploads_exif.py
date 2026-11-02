@@ -1,4 +1,4 @@
-"""Third re-test of intent/reject-unusable-uploads, after the D2/N1 fix
+"""Third re-test of intent/archive/reject-unusable-uploads, after the D2/N1 fix
 (`preprocess._apply_exif_orientation`): a readable orientation is applied even
 when `ImageOps.exif_transpose` fails, any other EXIF failure means upright, and
 only the pixel decode maps PIL errors to `ImageDecodeError`.

@@ -87,7 +87,7 @@ def test_decode_uncertain():
 
 
 # --------------------------------------------------------------------------- #
-# P(10) cut-off (intent/grade-decision-rule)
+# P(10) cut-off (intent/archive/grade-decision-rule)
 # --------------------------------------------------------------------------- #
 def _today(p):
     """decode before the cut-off: the hard grade is the median, 1 + #(P > 0.5)."""

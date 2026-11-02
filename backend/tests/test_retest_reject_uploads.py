@@ -1,4 +1,4 @@
-"""Re-test of intent/reject-unusable-uploads: 400 for undecodable uploads, 422 for
+"""Re-test of intent/archive/reject-unusable-uploads: 400 for undecodable uploads, 422 for
 a face with no card outline or a same-side pair (probe model only).
 
 Adversarial edges the developer's `test_reject_uploads.py` doesn't cover:

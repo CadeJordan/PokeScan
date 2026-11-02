@@ -1,4 +1,4 @@
-"""Bounded grading (intent/serving-hardening): /api/grade holds one of
+"""Bounded grading (intent/archive/serving-hardening): /api/grade holds one of
 `settings.grade_concurrency` tokens for its predict + centering, waits up to
 `grade_queue_timeout_s` for one, and answers 503 + Retry-After past that.
 

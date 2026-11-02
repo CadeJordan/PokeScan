@@ -1,5 +1,5 @@
 """Model provenance: `train_probe._git_commit` (also used by `train_face_guard`)
-returns HEAD, or None with a WARNING saying why (intent/serving-hardening)."""
+returns HEAD, or None with a WARNING saying why (intent/archive/serving-hardening)."""
 
 from __future__ import annotations
 

@@ -46,7 +46,7 @@ class Settings(BaseSettings):
 
     # Grades run at once per API process (`api/grade.py`); a request over the
     # limit waits up to `grade_queue_timeout_s` for a slot, then gets a 503.
-    # Measured (intent/serving-hardening): each extra concurrent grade adds only
+    # Measured (intent/archive/serving-hardening): each extra concurrent grade adds only
     # ~20-25 MB, and 1 at a time costs ~15% throughput, so the default is 4.
     # Running uvicorn with `--workers N` multiplies it.
     grade_concurrency: int = Field(default=4, ge=1)

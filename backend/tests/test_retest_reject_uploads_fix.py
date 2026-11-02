@@ -1,4 +1,4 @@
-"""Re-test of the D1 fix for intent/reject-unusable-uploads: `decode_image` wraps
+"""Re-test of the D1 fix for intent/archive/reject-unusable-uploads: `decode_image` wraps
 PIL's `_DECODE_ERRORS` in `ImageDecodeError`, decodes the pixels eagerly with
 `pil.load()`, and ignores a malformed EXIF block (orientation 1 when it can't be
 read; when it reads but `exif_transpose` fails, that orientation is applied

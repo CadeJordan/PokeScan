@@ -11,7 +11,7 @@ share grades, so the headline test number mixed seen-card performance
 (MAE 0.414) with unseen-card performance (MAE 0.628, n 137). The shuffle also
 re-dealt a whole grade whenever a PSA cert was added, so test certs drifted
 into train between harvests (fixed by the sticky split, phase 1 of
-`intent/stable-grouped-split`).
+`intent/archive/stable-grouped-split`).
 
 ## Decision
 
@@ -95,7 +95,7 @@ card-grouped before and after, so only the fit population changed.
   The CV numbers, not the test number, are the basis for model selection.
 - `ml/eval/baseline.json` is now tracked. It pins the served-path numbers
   above for `test_model_performance.py` and `evaluate`'s regression check.
-- This ADR is the baseline that `intent/face-side-orientation-guard` measures
+- This ADR is the baseline that `intent/archive/face-side-orientation-guard` measures
   against.
 - The old assignment is in `split_legacy`. To reproduce the old numbers, use
   the backups (`data/backups/pre-grouped-split.sqlite`,

@@ -1,4 +1,4 @@
-"""CI must fail when a test step runs no tests (intent/serving-hardening).
+"""CI must fail when a test step runs no tests (intent/archive/serving-hardening).
 
 The frontend's `npm test` checks this itself (`frontend/scripts/test.mjs`);
 the backend step relies on pytest's own exit code, pinned here.

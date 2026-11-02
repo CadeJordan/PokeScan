@@ -1,4 +1,4 @@
-"""Fourth re-test of intent/reject-unusable-uploads, after the D4 fix: bytes are
+"""Fourth re-test of intent/archive/reject-unusable-uploads, after the D4 fix: bytes are
 opened only as `preprocess.UPLOAD_FORMATS` (JPEG, PNG, WebP), and `KeyError` /
 `OverflowError` joined `_DECODE_ERRORS`.
 

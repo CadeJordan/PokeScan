@@ -35,9 +35,9 @@ So this spec is about finishing and verifying it, not writing it.
 
 - [x] `ci.yml` committed; both jobs green on a PR with no secrets configured. (PR #3, 2026-10-18)
 - [x] The Python job collects the same tests as locally: 248 passed / 3 xfailed / 31 deselected, give or take xpass changes. (CI: 248 passed / 3 xfailed / 31 deselected.)
-- [ ] No `continue-on-error` remains on Ruff; a PR introducing a ruff error fails.
+- [x] No `continue-on-error` remains on Ruff; a PR introducing a ruff error fails. (Checked 2026-11-02: `ci.yml` has no `continue-on-error`.)
 - [x] A failing test fails the run. (First PR #3 run failed on a real torch 2.14 ONNX-export break, since fixed by pinning CPU torch 2.5.1.)
-- [ ] The workflow never reads `.env`, `data/` or secrets; `model` tests skip because no weights exist.
+- [x] The workflow never reads `.env`, `data/` or secrets; `model` tests skip because no weights exist. (Checked 2026-11-02: `ci.yml` references none of them.)
 - [x] The Python job takes under 30 min (the configured timeout). (~1.5 min.)
 
 ## Facts vs assumptions

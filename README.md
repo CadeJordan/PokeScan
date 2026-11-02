@@ -30,7 +30,7 @@ fine-tuning ConvNeXt end to end collapsed towards a constant grade and scored
 below "always predict 10". Frozen features + linear probes can't collapse that
 way, refit in seconds, and the per-region probes give sub-grades that actually
 track the grade. The CNN and its training code were removed on 2026-11-01
-(`intent/retire-legacy-model`); see `docs/adr/0001-frozen-features-linear-probes.md`.
+(`intent/archive/retire-legacy-model`); see `docs/adr/0001-frozen-features-linear-probes.md`.
 
 ## Repo layout
 
@@ -140,7 +140,7 @@ uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000
 - Health: http://localhost:8000/api/health  
 - OpenAPI docs: http://localhost:8000/docs  
 
-Grading is bounded per process: at most `GRADE_CONCURRENCY` grades run at once (default 4: each extra concurrent grade adds only ~20–25 MB, and running one at a time costs ~15% throughput, `intent/serving-hardening`), and a request over the limit waits up to `GRADE_QUEUE_TIMEOUT_S` seconds (default 30) for a slot, then gets 503 `"server busy, try again"` with a `Retry-After` header. `/api/health` is never queued. The limit is per process, so `uvicorn --workers N` allows N × `GRADE_CONCURRENCY` grades at once (and loads the model N times).
+Grading is bounded per process: at most `GRADE_CONCURRENCY` grades run at once (default 4: each extra concurrent grade adds only ~20–25 MB, and running one at a time costs ~15% throughput, `intent/archive/serving-hardening`), and a request over the limit waits up to `GRADE_QUEUE_TIMEOUT_S` seconds (default 30) for a slot, then gets 503 `"server busy, try again"` with a `Retry-After` header. `/api/health` is never queued. The limit is per process, so `uvicorn --workers N` allows N × `GRADE_CONCURRENCY` grades at once (and loads the model N times).
 
 ### 2. Start the frontend
 
@@ -218,7 +218,7 @@ Changing existing assignments needs `--reassign`, a destructive step that
 resets every test number: only with the owner's approval and after a DB
 backup. `--mode stratified --reassign` is the old per-grade shuffle
 (`--ebay-split stratify` works only there). `--mode grouped --reassign` is the
-one-time re-split (phase 2 of `intent/stable-grouped-split`, run on 2026-10-27,
+one-time re-split (phase 2 of `intent/archive/stable-grouped-split`, run on 2026-10-27,
 `docs/adr/0002-card-grouped-test-split.md`): every PSA cert is re-placed by its
 card's hash, so no printed card spans train/val/test. The current DB is in that
 state; since then the default sticky mode keeps it.

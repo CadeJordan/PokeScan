@@ -1,4 +1,4 @@
-"""train_probe's P(10) cut-off: the tuning criterion and what main() stores (intent/grade-decision-rule)."""
+"""train_probe's P(10) cut-off: the tuning criterion and what main() stores (intent/archive/grade-decision-rule)."""
 
 from __future__ import annotations
 
