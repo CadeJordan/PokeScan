@@ -30,7 +30,7 @@ pair = _pair_fixture
 
 
 def _assert_fails_open(svc, expected: str):
-    assert svc.ready and svc.kind == "probe" and svc.probe_load_error is None
+    assert svc.ready and svc.probe_load_error is None
     assert svc._guard is None
     assert expected in svc.metadata["face_guard_load_error"]
     assert svc.metadata["face_guard"]["loaded"] is False

@@ -28,7 +28,6 @@ from fastapi.testclient import TestClient
 from PIL import Image, ImageOps, TiffImagePlugin
 from PIL import __version__ as pillow_version
 
-from backend.app.ml.inference import GradeInferenceService
 from backend.app.ml.preprocess import ImageDecodeError, decode_image, detect_and_crop
 from backend.tests.helpers.synth import make_scene, to_jpeg_bytes
 from backend.tests.test_face_guard import _feats, _guard, _service
@@ -616,7 +615,7 @@ def test_exif_only_fuzz_of_jpeg_never_raises_anything_but_a_decode_error():
 
 
 # --------------------------------------------------------------------------- #
-# End to end: precedence, face naming, legacy path
+# End to end: precedence, face naming
 # --------------------------------------------------------------------------- #
 def test_an_undecodable_back_beats_a_card_not_found_front(tmp_path, pair, blank, monkeypatch):
     r = _post(_service(tmp_path, _guard(), _feats()), monkeypatch, blank, pair[1][:300])
@@ -652,9 +651,7 @@ def test_a_fallback_face_read_as_flipped_is_still_card_not_found(
     assert r.status_code == 422 and r.json()["detail"] == f"front: {CARD_NOT_FOUND}"
 
 
-def test_a_broken_exif_photo_is_graded_by_the_legacy_model(
-    tiny_legacy_onnx, serve_env, pair, monkeypatch
-):
+def test_a_broken_exif_photo_is_graded(tmp_path, pair, monkeypatch):
     rgb = cv2.cvtColor(cv2.imdecode(np.frombuffer(pair[0], np.uint8), 1), cv2.COLOR_BGR2RGB)
     im = Image.fromarray(rgb)
     exif = im.getexif()
@@ -664,9 +661,7 @@ def test_a_broken_exif_photo_is_graded_by_the_legacy_model(
     e = _exif_entry(raw, 0x011A, 6)
     raw[e : e + 2] = struct.pack(">H", 0x014D)
     bad = _save(im, "PNG", exif=bytes(raw))
-    svc = GradeInferenceService(model_path=tiny_legacy_onnx)
-    assert svc.kind == "legacy" and svc.ready
-    r = _post(svc, monkeypatch, bad, pair[1], ctype="image/png")
+    r = _post(_service(tmp_path, _guard(), _feats()), monkeypatch, bad, pair[1], ctype="image/png")
     assert r.status_code == 200, r.text
 
 

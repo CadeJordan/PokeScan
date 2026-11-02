@@ -1,15 +1,14 @@
-"""Evaluate the exported ONNX grade model end-to-end on a dataset split.
+"""Evaluate the served grade model end-to-end on a dataset split.
 
-Runs the real serving path (`GradeInferenceService`: detect/crop -> ONNX ->
-CORN decode) on raw front/back photos and writes a JSON report plus charts.
+Runs the real serving path (`GradeInferenceService`: detect/crop -> region
+features -> probe head -> decode) on raw front/back photos and writes a JSON
+report plus charts.
 
     python -m ml.eval.evaluate --split test
     python -m ml.eval.evaluate --split test --limit 50 --no-robustness
     python -m ml.eval.evaluate --split test --perturbations rotate_180,swap_faces
     python -m ml.eval.evaluate --split test --save-baseline   # pin current numbers
-    python -m ml.eval.evaluate --split test --tta              # + test-time augmentation
     python -m ml.eval.evaluate --manifest data/raw_eval/manifest.csv   # raw-card set
-    python -m ml.eval.evaluate --model-path data/models/candidate.onnx # side-by-side
 
 Metrics
 - accuracy: MAE (soft + hard), exact, off-by-one, quadratic weighted kappa
@@ -768,10 +767,8 @@ def run_evaluation(
     limit: int | None = None,
     robustness_limit: int | None = 100,
     perturbations: list[str] | None = None,
-    model_path: Path | None = None,
     progress: bool = True,
     manifest: Path | None = None,
-    tta: bool = False,
     n_boot: int = 1000,
     exclude_fallback: bool = False,
 ) -> dict:
@@ -780,12 +777,9 @@ def run_evaluation(
     the metrics; the pipeline section still describes every card."""
     from backend.app.ml.inference import GradeInferenceService
 
-    service = GradeInferenceService(model_path=model_path, tta=tta)
+    service = GradeInferenceService()
     if not service.ready:
-        reason = service.metadata.get("probe_load_error")
-        if reason:
-            raise RuntimeError(f"probe model not loaded: {reason}")
-        raise RuntimeError(f"model not loaded from {service.model_path}")
+        raise RuntimeError(f"probe model not loaded: {service.metadata.get('probe_load_error')}")
     if manifest is not None:
         samples = load_manifest(manifest, limit)
         split = f"manifest:{Path(manifest).name}"
@@ -816,9 +810,8 @@ def run_evaluation(
     report["meta"] = {
         "split": split,
         "manifest": str(manifest) if manifest is not None else None,
-        "tta": list(service.tta),
         "exclude_fallback": exclude_fallback,
-        "model_path": str(service.model_path),
+        "model_path": str(service.head_path),
         "model_metadata": service.metadata,
         "providers": service._session.get_providers(),
     }
@@ -869,7 +862,6 @@ def main(
         help="Comma list of perturbations to run (default: all of "
         + ", ".join(ALL_PERTURBATIONS) + ").",
     ),
-    model_path: Path | None = typer.Option(None, help="Override ONNX model path."),
     out_dir: Path = typer.Option(DEFAULT_OUT, help="Where to write report.json and charts."),
     save_baseline: bool = typer.Option(False, help="Pin these numbers as the regression baseline."),
     manifest: Path | None = typer.Option(
@@ -877,17 +869,14 @@ def main(
         help="Evaluate a labelled CSV (front,back,grade[,id], extra columns kept as tags) "
         "instead of a DB split, e.g. raw cards or the phone set.",
     ),
-    tta: bool = typer.Option(
-        False, help="Test-time augmentation: average over hflip + dim/bright variants."
-    ),
     n_boot: int = typer.Option(1000, help="Bootstrap resamples for 95% CIs (0 disables)."),
     exclude_fallback: bool = typer.Option(
         False, help="Leave cards whose detection fell back (label visible) out of the metrics."
     ),
 ) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    if save_baseline and (manifest is not None or tta):
-        raise typer.BadParameter("--save-baseline only pins a plain DB split (no --manifest / --tta)")
+    if save_baseline and manifest is not None:
+        raise typer.BadParameter("--save-baseline only pins a plain DB split (no --manifest)")
     try:
         names = parse_perturbations(perturbations)
     except ValueError as exc:
@@ -897,9 +886,7 @@ def main(
         limit=limit,
         robustness_limit=0 if no_robustness else robustness_limit,
         perturbations=names,
-        model_path=model_path,
         manifest=manifest,
-        tta=tta,
         n_boot=n_boot,
         exclude_fallback=exclude_fallback,
     )

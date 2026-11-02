@@ -1,10 +1,9 @@
-"""Training metrics (ml/training/metrics.py) and eval metrics (ml/eval/evaluate.py)."""
+"""Eval metrics (ml/eval/evaluate.py)."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
-import torch
 
 from ml.eval.evaluate import (
     baselines,
@@ -16,38 +15,24 @@ from ml.eval.evaluate import (
     quadratic_weighted_kappa,
     summarize,
 )
-from ml.training.metrics import confusion_matrix, exact_match, mean_absolute_error, off_by_one
 
 TRUE = [10, 9, 8, 10, 7]
 PRED = [10, 10, 6, 9, 7]
 
 
 # --------------------------------------------------------------------------- #
-# ml/training/metrics.py
+# Confusion matrix
 # --------------------------------------------------------------------------- #
-def test_training_metrics_hand_computed():
-    t, p = torch.tensor(TRUE), torch.tensor(PRED)
-    assert mean_absolute_error(p, t).item() == pytest.approx(4 / 5)
-    assert exact_match(p, t).item() == pytest.approx(2 / 5)
-    assert off_by_one(p, t).item() == pytest.approx(4 / 5)
-
-
-def test_training_confusion_matrix():
-    cm = confusion_matrix(torch.tensor(PRED), torch.tensor(TRUE))
+def test_confusion_hand_computed():
+    cm = confusion(np.array(TRUE), np.array(PRED))
     assert cm.shape == (10, 10)
-    assert cm.sum().item() == 5
-    assert cm[9, 9] == 1 and cm[9, 8] == 1 and cm[8, 9] == 1 and cm[7, 5] == 1 and cm[6, 6] == 1
+    assert cm.sum() == 5
+    assert cm[9, 9] == 1 and cm[8, 9] == 1 and cm[9, 8] == 1 and cm[7, 5] == 1 and cm[6, 6] == 1
 
 
-def test_confusion_matrix_clamps_out_of_range():
-    cm = confusion_matrix(torch.tensor([0, 11]), torch.tensor([1, 10]))
+def test_confusion_clamps_out_of_range():
+    cm = confusion(np.array([1, 10]), np.array([0, 11]))
     assert cm[0, 0] == 1 and cm[9, 9] == 1
-
-
-def test_numpy_confusion_matches_torch():
-    a = confusion(np.array(TRUE), np.array(PRED))
-    b = confusion_matrix(torch.tensor(PRED), torch.tensor(TRUE)).numpy()
-    np.testing.assert_array_equal(a, b)
 
 
 # --------------------------------------------------------------------------- #
@@ -398,8 +383,7 @@ class _FakeService:
     """Predicts the true grade only when the card is NOT found (a 'label leak')."""
 
     ready = True
-    tta = ()
-    model_path = "fake.onnx"
+    head_path = "fake.npz"
     metadata: dict = {}
 
     class _session:  # noqa: N801

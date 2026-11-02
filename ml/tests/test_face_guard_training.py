@@ -465,7 +465,7 @@ def test_served_features_match_the_real_service_on_db_photos(tmp_path):
     if not rows or not all((s.data_dir / r[k]).exists() for r in rows for k in tfg.SERVED_PATHS):
         pytest.skip("original photos missing")
     svc = GradeInferenceService()
-    if not svc.ready or svc.kind != "probe":
+    if not svc.ready:
         pytest.skip(f"probe model not loaded: {svc.metadata.get('probe_load_error')}")
     try:
         up, rot = tfg.load_face_features("served", rows, s.data_dir, tmp_path / "cache")

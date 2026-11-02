@@ -44,8 +44,6 @@ jobs:
 
       # slow/model/visual need real data, exported weights, or write overlays; tests use synthetic cards
       - name: Pytest
-        env:
-          WANDB_MODE: disabled
         run: pytest -m "not slow and not model and not visual" -q
 
   frontend:

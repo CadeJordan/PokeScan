@@ -1,8 +1,7 @@
 """Rejecting unusable uploads (intent/reject-unusable-uploads).
 
-An undecodable image gives 400 (any model). With the probe model, a face with no
-card outline or a pair the face guard reads as two of one side gives 422; the
-legacy model grades those as before. Synthetic images and stub services only.
+An undecodable image gives 400. A face with no card outline or a pair the face
+guard reads as two of one side gives 422. Synthetic images and stub services only.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ from fastapi.testclient import TestClient
 from PIL import Image, ImageFile, ImageOps
 
 from backend.app.ml.face_guard import NOTE_BOTH, NOTE_SWAPPED
-from backend.app.ml.inference import GradeInferenceService, GradePrediction
+from backend.app.ml.inference import GradePrediction
 from backend.app.ml.preprocess import ImageDecodeError, decode_image, detect_and_crop
 from backend.tests.helpers.synth import make_scene, to_jpeg_bytes
 from backend.tests.test_face_guard import _feats, _guard, _service
@@ -110,16 +109,6 @@ def test_both_unreadable_names_the_front(tmp_path, corrupt, monkeypatch):
     r = _post(svc, monkeypatch, corrupt["garbage"], corrupt["jpeg_half"])
     assert r.status_code == 400
     assert r.json()["detail"] == f"front: {UNREADABLE}"
-
-
-def test_unreadable_upload_gives_400_with_the_legacy_model(
-    tiny_legacy_onnx, serve_env, pair, corrupt, monkeypatch
-):
-    svc = GradeInferenceService(model_path=tiny_legacy_onnx)
-    assert svc.kind == "legacy" and svc.ready
-    r = _post(svc, monkeypatch, pair[0], corrupt["png_half"])
-    assert r.status_code == 400
-    assert r.json()["detail"] == f"back: {UNREADABLE}"
 
 
 def test_predict_labels_the_decode_error(tmp_path, pair, corrupt):
@@ -392,7 +381,7 @@ def test_a_detection_error_after_decoding_is_still_500(tmp_path, pair, monkeypat
 
 
 # --------------------------------------------------------------------------- #
-# Card not found -> 422 (probe model only)
+# Card not found -> 422
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(
     "front_ok, back_ok, faces",
@@ -404,14 +393,6 @@ def test_card_not_found_gives_422(client, fake_service, scene_jpeg, front_ok, ba
     r = client.post("/api/grade", files=files)
     assert r.status_code == 422, r.text
     assert r.json()["detail"] == f"{faces}: {CARD_NOT_FOUND}"
-
-
-def test_legacy_model_still_grades_a_fallback_face(client, fake_service, scene_jpeg):
-    fake_service.prediction.found_quad_front = False  # region_grades None: legacy path
-    files = {"front": ("f.jpg", scene_jpeg, "image/jpeg"), "back": ("b.jpg", scene_jpeg, "image/jpeg")}
-    r = client.post("/api/grade", files=files)
-    assert r.status_code == 200, r.text
-    assert "front: card outline not auto-detected; used center-padded fallback" in r.json()["notes"]
 
 
 def test_card_not_found_through_the_probe_service(tmp_path, pair, blank, monkeypatch):
@@ -506,11 +487,6 @@ def test_guard_error_grades_unguarded(tmp_path, pair, monkeypatch):
 def test_card_not_found_takes_precedence_over_same_side():
     pred = _probe_prediction(found_quad_back=False, same_side="back")
     assert pred.rejection() == ("card_not_found", f"back: {CARD_NOT_FOUND}")
-
-
-def test_legacy_prediction_is_never_rejected():
-    pred = _probe_prediction(region_grades=None, found_quad_front=False, same_side="back")
-    assert pred.rejection() is None
 
 
 # --------------------------------------------------------------------------- #
