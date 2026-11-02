@@ -24,7 +24,10 @@ from backend.app.ml.inference import GradePrediction
 from backend.app.ml.preprocess import ImageDecodeError
 from backend.tests.conftest import FakeService
 
-TIMEOUT_S = 1.0  # queue timeout in these tests
+TIMEOUT_S = 1.0  # queue timeout in these tests: a leaked token shows up as a quick 503
+# Queue timeout for a request that must wait out another's whole grade (predict +
+# real centering), which can take over a second on a slow CI runner.
+WAIT_S = 10.0
 GATE_S = 10.0  # a gated predict never blocks a broken test for longer than this
 
 
@@ -63,12 +66,13 @@ def service() -> GatedService:
 
 @pytest.fixture
 def limit(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
-    def configure(concurrency: int = 1, timeout_s: float = TIMEOUT_S) -> None:
+    def configure(concurrency: int = 1, timeout_s: float = TIMEOUT_S, reset: bool = True) -> None:
         settings = Settings(
             _env_file=None, grade_concurrency=concurrency, grade_queue_timeout_s=timeout_s
         )
         monkeypatch.setattr(grade_mod, "get_settings", lambda: settings)
-        grade_mod.reset_grade_limiter()
+        if reset:  # the queue timeout is read per request, so it can change mid-test
+            grade_mod.reset_grade_limiter()
 
     configure()
     yield configure
@@ -106,7 +110,8 @@ def _stats():
     return grade_mod.grade_limiter().statistics()
 
 
-async def test_over_limit_request_waits_then_times_out(client, service, scene_jpeg):
+async def test_over_limit_request_waits_then_times_out(client, service, limit, scene_jpeg):
+    limit(timeout_s=WAIT_S)
     results: dict[str, httpx.Response] = {}
 
     async def post(name: str) -> None:
@@ -124,6 +129,7 @@ async def test_over_limit_request_waits_then_times_out(client, service, scene_jp
         assert results["a"].status_code == 200
 
         # Third request: b holds the only token past the queue timeout.
+        limit(timeout_s=TIMEOUT_S, reset=False)
         t0 = time.perf_counter()
         r = await client.post("/api/grade", files=_files(scene_jpeg))
         waited = time.perf_counter() - t0
@@ -138,7 +144,7 @@ async def test_over_limit_request_waits_then_times_out(client, service, scene_jp
 
 
 async def test_concurrency_setting_allows_that_many_grades(client, service, limit, scene_jpeg):
-    limit(concurrency=2)
+    limit(concurrency=2, timeout_s=WAIT_S)
     async with anyio.create_task_group() as tg:
         for _ in range(3):
             tg.start_soon(_post, client, scene_jpeg)
@@ -153,7 +159,7 @@ async def test_health_and_upload_checks_answer_while_grading(client, service, sc
     async with anyio.create_task_group() as tg:
         tg.start_soon(_post, client, scene_jpeg)
         await _until(lambda: service.entered == 1)
-        with anyio.fail_after(1.0):
+        with anyio.fail_after(3.0):  # health would block until GATE_S if it waited
             health = await client.get("/api/health")
             # An oversized upload is refused before it would wait for a token.
             big = await client.post(
@@ -193,8 +199,8 @@ async def test_token_released_on_error(client, service, scene_jpeg, error, predi
     # The next request gets the token at once.
     service.error = None
     service.prediction = FakeService().prediction
-    with anyio.fail_after(TIMEOUT_S / 2):
-        r = await client.post("/api/grade", files=_files(scene_jpeg))
+    # With the short queue timeout, a leaked token would give a 503 here.
+    r = await client.post("/api/grade", files=_files(scene_jpeg))
     assert r.status_code == 200
 
 
@@ -237,8 +243,8 @@ async def test_cancel_during_grade_keeps_token_until_predict_ends(client, servic
     assert scope.cancelled_caught
     assert _stats().borrowed_tokens == 0
     service.hold = False
-    with anyio.fail_after(TIMEOUT_S / 2):
-        r = await client.post("/api/grade", files=_files(scene_jpeg))
+    # With the short queue timeout, a leaked token would give a 503 here.
+    r = await client.post("/api/grade", files=_files(scene_jpeg))
     assert r.status_code == 200
 
 
