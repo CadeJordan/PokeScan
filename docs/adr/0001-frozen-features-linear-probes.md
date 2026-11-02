@@ -71,7 +71,7 @@ design, so what varies is condition rather than artwork.
 - Training takes about a minute after features are cached, so retraining as
   the harvest grows is cheap.
 - Inference: ~1.5 s per face for DINOv2 on CPU (ONNX Runtime); the head is numpy.
-- The CORN `cummin` vs `cumprod` question (`intent/corn-decode-verification`)
+- The CORN `cummin` vs `cumprod` question (`intent/archive/corn-decode-verification`)
   only affects the legacy model; proportional odds is monotone by construction.
 - All training data is slab photos. Accuracy on raw phone photos is unmeasured;
   `python -m ml.eval.evaluate --manifest` can measure it once a labelled set exists.

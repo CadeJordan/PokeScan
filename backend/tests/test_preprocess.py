@@ -297,7 +297,7 @@ def test_detection_speed():
 
 
 # --------------------------------------------------------------------------- #
-# Slab failure types on PSA photos (intent/tighter-slab-crops)
+# Slab failure types on PSA photos (intent/archive/tighter-slab-crops)
 # --------------------------------------------------------------------------- #
 def _slab_well(rng: np.random.Generator, well_luma: int) -> tuple[np.ndarray, np.ndarray]:
     """A 1024x610 slab photo: plastic, label, a bright lip around a grey well,
@@ -412,7 +412,7 @@ def _raw_card_flat_border(
 
 
 RAW_CARD_MIN_IOU = 0.9
-# Known weakness (intent/serving-hardening, section 3): when the art window has
+# Known weakness (intent/archive/serving-hardening, section 3): when the art window has
 # a visible frame line it is a strong nested outline, and the last-resort
 # flat-ring step takes the card's flat border for a gasket, at the first step,
 # exactly as it must for `silver_full_art_in_grey_well`. The two scenes look the
@@ -437,7 +437,7 @@ _RAW_WINDOW_XFAIL = pytest.mark.xfail(
     ],
 )
 def test_raw_card_with_flat_border_keeps_its_outline(border, window, frame, angle, tmp_path):
-    """Raw uploads (intent/serving-hardening): a card's own flat border is not
+    """Raw uploads (intent/archive/serving-hardening): a card's own flat border is not
     a slab gasket, so the crop must keep the card's outline, not its art window."""
     img, quad = _raw_card_flat_border(0, border, window, frame, angle)
     path = tmp_path / "raw.jpg"

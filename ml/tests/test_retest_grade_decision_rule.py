@@ -1,4 +1,4 @@
-"""Independent retest of intent/grade-decision-rule (ADR 0003).
+"""Independent retest of intent/archive/grade-decision-rule (ADR 0003).
 
 Gaps not pinned by test_grade_head.py / test_inference.py / test_ten_cutoff.py:
 - the shipped head's `ten_cutoff` is what its own stored `ten_cutoff_tuning` gives under

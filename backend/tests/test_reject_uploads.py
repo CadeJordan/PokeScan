@@ -1,4 +1,4 @@
-"""Rejecting unusable uploads (intent/reject-unusable-uploads).
+"""Rejecting unusable uploads (intent/archive/reject-unusable-uploads).
 
 An undecodable image gives 400. A face with no card outline or a pair the face
 guard reads as two of one side gives 422. Synthetic images and stub services only.

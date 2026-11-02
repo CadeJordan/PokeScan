@@ -60,7 +60,7 @@ app = typer.Typer(add_completion=False)
 REPORT_PATH = PROJECT_ROOT / "test-artifacts" / "eval" / "probe_report.json"
 
 # P(10) cut-offs tried by `tune_ten_cutoff`, over CV seeds 0-4
-# (intent/grade-decision-rule, docs/adr/0003-grade-decision-rule.md).
+# (intent/archive/grade-decision-rule, docs/adr/0003-grade-decision-rule.md).
 CUTOFF_GRID = tuple(round(0.5 + 0.02 * i, 2) for i in range(11))
 CUTOFF_SEEDS = tuple(range(5))
 CUTOFF_CRITERION = (

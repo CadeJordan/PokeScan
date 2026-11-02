@@ -36,7 +36,7 @@ Remove the end-to-end ConvNeXt CORN model (`grade_model.onnx`) and everything th
 **Docs:**
 - `CLAUDE.md`, `README.md` (training, ONNX export, TTA, `ALLOW_LEGACY_MODEL`) and `.env.example` if present.
 - The plan: item 11 done, open question 3 closed.
-- `intent/corn-decode-verification`: closed as won't-do, with a one-line reason at the top.
+- `intent/archive/corn-decode-verification`: closed as won't-do, with a one-line reason at the top.
 - ADR 0001 is history; it's left as written.
 
 ## What stays

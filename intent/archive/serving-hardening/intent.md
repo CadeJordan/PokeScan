@@ -66,7 +66,7 @@ No model, threshold or schema change. Served grades stay identical.
 - [x] Grading is bounded by `grade_concurrency`. A request over the limit waits up to `grade_queue_timeout_s`, then gets 503 + `Retry-After`. Health stays responsive. Tests cover the wait, the timeout, release on every error path, and health under load.
 - [x] The load measurement before and after is recorded here; peak RSS under 16 concurrent requests is bounded after the change.
 - [x] `npm test` fails on zero tests and passes today; CI unchanged otherwise.
-- [ ] Raw-card negative tests exist. Either they pass, or the detector fix keeps all 5,260 PSA quads identical. **Not met — deferred:** shipped as xfail (5 of 6 cases); the owner chose to wait for the phone-photo set before any detector work. Follow-up under item 8 of `intent/cv-ml-improvement-plan.md`; see Implementation, section 3.
+- [ ] Raw-card negative tests exist. Either they pass, or the detector fix keeps all 5,260 PSA quads identical. **Not met — deferred:** shipped as xfail (5 of 6 cases); the owner chose to wait for the phone-photo set before any detector work. Follow-up under item 8 of `intent/cv-ml-improvement-plan.md`; see Implementation, section 3. Now [[raw-card-detection]] (`intent/raw-card-detection/intent.md`).
 - [x] The plan table is current, `dataset.precrop_coverage` is gone, `_git_commit` logs a warning on failure.
 - [x] Served responses are identical on the 20-pair set from [[retire-legacy-model]] (`test-artifacts/retire_legacy/pairs.json`) when unloaded. The fast suite, `ruff`, frontend test and build all pass.
 

@@ -18,7 +18,7 @@ card inside. We want just the card. Approach:
 4. Apply a perspective warp to a fixed canvas.
 
 On PSA slab photos (measured with `precrop.crop_kind`; see
-intent/tighter-slab-crops) this lands on the card itself for ~96% of fronts
+intent/archive/tighter-slab-crops) this lands on the card itself for ~96% of fronts
 and ~98% of backs; most of the rest are the slab well/gasket window around
 the card, which excludes the grade label.
 

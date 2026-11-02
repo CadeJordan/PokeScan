@@ -1,6 +1,6 @@
 # 3. A 10 needs P(10) above a tuned cut-off
 
-Date: 2026-10-31. Status: accepted. Spec: `intent/grade-decision-rule/intent.md`.
+Date: 2026-10-31. Status: accepted. Spec: `intent/archive/grade-decision-rule/intent.md`.
 
 ## Context
 
