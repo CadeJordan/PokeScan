@@ -24,7 +24,7 @@ npm run preview    # Cloudflare runtime via OpenNext; npm run deploy to ship
 
 # Lint / tests (testpaths: backend/tests, ml/tests)
 ruff check .
-python -m pytest -m "not slow and not visual and not model"   # fast suite, ~4 min; baseline 1584 passed, 1 skipped, 6 xfailed
+python -m pytest -m "not slow and not visual and not model"   # fast suite, ~4 min; baseline 1608 passed, 1 skipped, 6 xfailed
 python -m pytest path/to/test_file.py::test_name
 # markers: slow (sweeps, full test-split eval), model (needs the probe files in data/models/, else skips),
 #          visual (writes overlays to test-artifacts/overlays/)
@@ -32,7 +32,7 @@ python -m pytest path/to/test_file.py::test_name
 
 Data collection and the training pipeline (run in order: split → precrop → `python -m ml.training.train_probe`): see `README.md`. Evaluate models with card-grouped CV (`train_probe` does): a printed card has several certs, so per-cert folds leak card identity. The test split itself is card-grouped since 2026-10-27 (`--mode grouped --reassign`, `docs/adr/0002-card-grouped-test-split.md`): no printed card spans train/val/test, and the pre-re-split assignment is kept in `split_legacy`.
 
-`split` is sticky: `python -m ml.data.split` only places unassigned certs and never moves an assigned one (check with `--dry-run`, which opens the DB read-only). `--reassign` (`--mode stratified` or `grouped`) rewrites existing assignments and resets every test number: it's a destructive action that needs the owner's explicit approval and a DB backup first.
+`split` is sticky: `python -m ml.data.split` only places unassigned certs and never moves an assigned one (check with `--dry-run`, which opens the DB read-only). `--reassign` (`--mode stratified` or `grouped`) rewrites existing assignments and resets every test number: it's a destructive action that needs the owner's explicit approval and a DB backup first (`split` takes one automatically, see Gotchas).
 
 Test-set policy (decided 2026-10-27): the test split gives one final number per ADR. All model selection (hyperparameters, features, thresholds) uses card-grouped CV on train+val, never the test split.
 
@@ -60,6 +60,8 @@ Restart the API after `train_probe` or `train_face_guard` — the model is loade
 - Don't put data under `frontend/data/` (gitignored; an easy mistake after `cd frontend`).
 - `data/` (images, crops, `pokescan.sqlite`, models) is the only copy of quota-limited harvest data. Never download, move, or delete images, or rewrite the DB, unless the task explicitly asks. Tests must use `tmp_path` and only *read* real data.
 - Long jobs (`precrop --force`, `train_probe`, collectors) may already be running and writing the DB. Check before starting another DB-writing command, and don't run two at once.
+- `split` (every mode except `--dry-run`) and `precrop` (every mode) snapshot the DB to `data/backups/auto/` first (`db.backup_db`, newest 5 kept, nothing outside `auto/` pruned) and stop if that fails (including when the DB doesn't exist: they no longer create an empty one); `--no-backup` skips it. Readers that must never write (`load_records`, `ml.eval`, tests) use `connect(path, read_only=True)`: no migration, no folder, `FileNotFoundError` when the DB is missing.
+- The root `conftest.py` snapshots `data/images`, `images_full`, `crops`, `models`, `backups` (size + mtime), the DB schema and the `certs` row count at session start, and fails the session (an error at the last test's teardown) if a test changed any file or the schema, or the row count dropped; rows themselves aren't compared, since a collector may be adding them. A collector, `precrop` or `split` running during the tests also trips it (it downloads or writes files): rerun when it's done. Off when `data/` is missing (CI). Tests that need a DB or data folder build one on `tmp_path`.
 - Card images exist in git history (commit `608c429`, ~271 MiB). Don't `git add` anything under `data/`. History rewriting is pending a decision (`intent/git-history-image-purge`).
 
 ## Intent specs

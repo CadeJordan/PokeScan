@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+import re
 import sqlite3
+import urllib.parse
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS certs (
@@ -97,8 +103,35 @@ def _migrate(conn) -> None:
             conn.execute(f"ALTER TABLE certs ADD COLUMN {col} TEXT")
 
 
+def _ro_uri(db_path: Path) -> str:
+    """`file:` URI opening `db_path` read-only; quoted so `#`/`%`/`?` in the path work."""
+    return "file:" + urllib.parse.quote(Path(db_path).resolve().as_posix(), safe="/:") + "?mode=ro"
+
+
 @contextmanager
-def connect(db_path: Path, busy_timeout_ms: int = 5_000) -> Iterator[sqlite3.Connection]:
+def connect(
+    db_path: Path, busy_timeout_ms: int = 5_000, *, read_only: bool = False
+) -> Iterator[sqlite3.Connection]:
+    """Open the DB. Read-write (the default) creates the folder, applies the
+    schema and migrations, and commits on exit.
+
+    read_only=True opens it `mode=ro`: no folder, DDL, migration or commit, any
+    write raises `sqlite3.OperationalError`, and a missing file raises
+    `FileNotFoundError` (instead of creating an empty DB). For readers that must
+    never change the harvest DB (`load_records`, `ml.eval`, tests).
+    """
+    if read_only:
+        if not Path(db_path).is_file():
+            raise FileNotFoundError(f"DB not found: {db_path}")
+        conn = sqlite3.connect(_ro_uri(db_path), uri=True, timeout=busy_timeout_ms / 1000)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+            yield conn
+        finally:
+            conn.close()
+        return
+
     db_path.parent.mkdir(parents=True, exist_ok=True)
     # `timeout` lets sqlite3 wait out transient locks (e.g. another process
     # finishing a write) instead of failing immediately; combined with the
@@ -115,6 +148,88 @@ def connect(db_path: Path, busy_timeout_ms: int = 5_000) -> Iterator[sqlite3.Con
         conn.commit()
     finally:
         conn.close()
+
+
+# Automatic snapshots: `<db folder>/backups/auto/pokescan-<UTC time>-<command>[-N].sqlite`.
+# Only files matching this are ever pruned; hand-made backups are never touched.
+_AUTO_BACKUP_RE = re.compile(r"^pokescan-(\d{8}T\d{6}Z)-([A-Za-z0-9_]+)(?:-(\d+))?\.sqlite$")
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _auto_backup_key(path: Path) -> tuple[str, int]:
+    m = _AUTO_BACKUP_RE.match(path.name)
+    assert m is not None
+    return m.group(1), int(m.group(3) or 0)
+
+
+def backup_db(
+    db_path: Path,
+    dest_dir: Path | None = None,
+    keep: int = 5,
+    *,
+    command: str,
+) -> Path:
+    """Consistent snapshot of `db_path` before a command rewrites it; returns its path.
+
+    Uses `sqlite3.Connection.backup()`, which copies a consistent state even
+    while another process holds a write transaction. Writes to `dest_dir`
+    (default `<db folder>/backups/auto/`) and then keeps only the newest `keep`
+    automatic backups there. Raises if the DB is missing or the copy fails, so
+    the caller stops before writing anything unprotected.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_]+", command):
+        raise ValueError(f"command must be [A-Za-z0-9_]+, got {command!r}")
+    if keep < 1:
+        raise ValueError("keep must be >= 1")
+    dest_dir = Path(dest_dir) if dest_dir is not None else Path(db_path).parent / "backups" / "auto"
+    if not Path(db_path).is_file():
+        raise FileNotFoundError(f"DB not found, nothing to back up: {db_path}")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    stem = f"pokescan-{_utcnow():%Y%m%dT%H%M%SZ}-{command}"
+    dest = dest_dir / f"{stem}.sqlite"
+    n = 1
+    while dest.exists():  # two runs within one second
+        n += 1
+        dest = dest_dir / f"{stem}-{n}.sqlite"
+    # Copy to a name the pattern doesn't match, then rename: a failed copy never
+    # leaves a file that looks like a good backup (or gets counted when pruning).
+    partial = dest.with_name(dest.name + ".partial")
+    try:
+        src = sqlite3.connect(_ro_uri(db_path), uri=True, timeout=30)
+        try:
+            dst = sqlite3.connect(str(partial))
+            try:
+                src.backup(dst)
+                check = dst.execute("PRAGMA quick_check").fetchone()[0]
+            finally:
+                dst.close()
+        finally:
+            src.close()
+        if check != "ok":
+            raise sqlite3.DatabaseError(f"backup failed quick_check: {check}")
+        partial.replace(dest)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+    log.info("backed up %s -> %s", db_path, dest)
+
+    # `dest` is never pruned, even if a clock behind an older backup's name
+    # would sort it first.
+    autos = sorted(
+        (
+            p for p in dest_dir.iterdir()
+            if p.is_file() and p != dest and _AUTO_BACKUP_RE.match(p.name)
+        ),
+        key=_auto_backup_key,
+    )
+    for old in autos[: max(len(autos) - (keep - 1), 0)]:
+        old.unlink()
+        log.info("pruned old backup %s", old.name)
+    return dest
 
 
 def upsert_cert(conn: sqlite3.Connection, row: dict) -> None:

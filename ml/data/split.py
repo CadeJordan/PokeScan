@@ -21,6 +21,9 @@ Modes:
 `--reassign` rewrites existing assignments; the first reassign keeps the old
 ones in `split_legacy` and later ones leave it alone. In sticky and grouped mode
 an eBay cert of a card with a PSA test cert gets 'excluded', which no loader reads.
+
+Every run except `--dry-run` first snapshots the DB to `data/backups/auto/`
+(`backup_db`, newest 5 kept); `--no-backup` skips it.
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ import typer
 from rich.logging import RichHandler
 
 from backend.app.core.config import get_settings
-from ml.data.db import connect, grade_distribution
+from ml.data.db import backup_db, connect, grade_distribution
 from ml.data.groups import SPLIT_SALT, card_group_key, group_bucket
 
 logging.basicConfig(level=logging.INFO, handlers=[RichHandler(rich_tracebacks=True)])
@@ -273,6 +276,9 @@ def main(
     ebay_split: str = typer.Option(
         "train", help="'train' (default: eBay never in val/test) or 'stratify' (stratified only)."
     ),
+    no_backup: bool = typer.Option(
+        False, "--no-backup", help="Skip the automatic DB snapshot to backups/auto/."
+    ),
 ) -> None:
     if mode not in MODES:
         raise typer.BadParameter(f"--mode must be one of {', '.join(MODES)}")
@@ -286,12 +292,8 @@ def main(
 
     db = db_path or get_settings().db_path
     if dry_run:
-        conn = sqlite3.connect(f"file:{db.resolve().as_posix()}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
-        try:
+        with connect(db, read_only=True) as conn:
             rows = _read_rows(conn)
-        finally:
-            conn.close()
         if rows:
             _assign_and_log(rows, mode, val_frac, test_frac, seed, salt, ebay_split)
             log.info("dry run: nothing written")
@@ -299,6 +301,8 @@ def main(
             log.warning("no eligible certs - run `collect` first")
         return
 
+    if not no_backup:
+        backup_db(db, command="split")  # raises (and so writes nothing) if it fails
     with connect(db) as conn:
         rows = _read_rows(conn)
         if not rows:

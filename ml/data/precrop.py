@@ -10,6 +10,9 @@ Usage:
     python -m ml.data.precrop --force
     python -m ml.data.precrop --split train
 
+Every run first snapshots the DB to `data/backups/auto/` (`backup_db`, newest
+5 kept); `--no-backup` skips it.
+
 Each cert also gets `crop_found_front/back` (outline detected; a miss means
 the "crop" is the padded raw slab photo, label included) and
 `crop_kind_front/back` ('card' | 'well' | 'small' | 'none' | 'unknown', see
@@ -29,6 +32,7 @@ from tqdm import tqdm
 from backend.app.core.config import get_settings
 from backend.app.ml.preprocess import detect_and_crop, encode_jpeg
 from ml.data.db import (
+    backup_db,
     connect,
     precrop_coverage,
     precrop_coverage_by_split,
@@ -93,10 +97,16 @@ def main(
     split: str | None = typer.Option(None, help="Only process certs in this split."),
     limit: int | None = typer.Option(None, help="Cap number of certs processed."),
     db_path: Path | None = typer.Option(None, help="Override SQLite DB path."),
+    no_backup: bool = typer.Option(
+        False, "--no-backup", help="Skip the automatic DB snapshot to backups/auto/."
+    ),
 ) -> None:
     settings = get_settings()
     db = db_path or settings.db_path
     data_root = settings.data_dir
+
+    if not no_backup:
+        backup_db(db, command="precrop")  # raises (and so writes nothing) if it fails
 
     with connect(db) as conn:
         cov = precrop_coverage(conn)

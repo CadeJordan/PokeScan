@@ -1,5 +1,7 @@
 # DB backup before destructive runs
 
+Superseded by [[data-safety]] (2026-11-02).
+
 ## Intent
 
 Any pipeline command that rewrites existing rows in `data/pokescan.sqlite` (`--force` reruns, `split`) first takes a timestamped, consistent snapshot of the DB, so a bad run can be rolled back.

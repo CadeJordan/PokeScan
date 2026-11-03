@@ -44,7 +44,6 @@ import json
 import logging
 import math
 import os
-import sqlite3
 import subprocess
 import time
 from collections import deque
@@ -75,6 +74,7 @@ from backend.app.ml.features import (
     REGION_NAMES,
 )
 from backend.app.ml.preprocess import CARD_H, CARD_W, decode_image, detect_and_crop
+from ml.data.db import connect
 from ml.data.groups import card_group_key
 
 logging.basicConfig(level=logging.INFO, handlers=[RichHandler(rich_tracebacks=True)])
@@ -220,19 +220,10 @@ CANDIDATE_SQL = (
 )
 
 
-def connect_ro(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
 def load_candidates(db_path: Path) -> list[dict]:
     """PSA 9 / 10 train+val certs with both original URLs and a usable precrop."""
-    conn = connect_ro(db_path)
-    try:
+    with connect(db_path, read_only=True) as conn:
         rows = [dict(r) for r in conn.execute(CANDIDATE_SQL)]
-    finally:
-        conn.close()
     return [r for r in rows if r["split"] in TRAINVAL]
 
 

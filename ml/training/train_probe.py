@@ -49,6 +49,7 @@ from backend.app.ml.features import (
     to_input,
 )
 from backend.app.ml.grade_head import DEFAULT_TEN_CUTOFF, TEN_CUTOFF_KEY, decode
+from ml.data.db import connect
 from ml.eval.evaluate import expected_calibration_error, summarize
 from ml.training.probe import L2, PCA_DIM, card_groups, cross_validate, fit_grade_head
 
@@ -72,9 +73,7 @@ CUTOFF_CRITERION = (
 
 def load_rows(db_path: Path) -> list[sqlite3.Row]:
     """Certs with a usable precrop (read-only: never migrates or writes the DB)."""
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    try:
+    with connect(db_path, read_only=True) as conn:
         return conn.execute(
             "SELECT cert_number, grade_int, split, brand_title, subject, card_number, "
             "cropped_front_path, cropped_back_path, front_path, back_path FROM certs "
@@ -84,8 +83,6 @@ def load_rows(db_path: Path) -> list[sqlite3.Row]:
             "AND cropped_front_path IS NOT NULL AND cropped_back_path IS NOT NULL "
             "ORDER BY cert_number"
         ).fetchall()
-    finally:
-        conn.close()
 
 
 def _read_rgb(path: Path) -> np.ndarray:

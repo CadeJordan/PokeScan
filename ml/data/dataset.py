@@ -59,7 +59,7 @@ def load_records(
     settings = get_settings()
     data_root = settings.data_dir
     out: list[CardRecord] = []
-    with connect(settings.db_path) as conn:
+    with connect(settings.db_path, read_only=True) as conn:
         rows = conn.execute(
             "SELECT cert_number, grade_int, front_path, back_path, "
             "cropped_front_path, cropped_back_path, "
