@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import io
 import json
-import sqlite3
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -32,6 +31,7 @@ from tqdm import tqdm
 
 from backend.app.core.config import PROJECT_ROOT, get_settings
 from backend.app.ml.preprocess import detect_and_crop
+from ml.data.db import connect
 
 OUT_DIR = PROJECT_ROOT / "test-artifacts" / "detection_failures"
 VARIANTS = ("orig", "exif_rot90", "rot90", "rot180", "up3x")
@@ -95,12 +95,8 @@ def main(
     if limit:
         sql += f" LIMIT {int(limit)}"
     # Read-only: this report must never migrate or write the harvest DB.
-    conn = sqlite3.connect(f"file:{settings.db_path.resolve().as_posix()}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    try:
+    with connect(settings.db_path, read_only=True) as conn:
         rows = conn.execute(sql, params).fetchall()
-    finally:
-        conn.close()
 
     out_dir = OUT_DIR if variant == "orig" else OUT_DIR / variant
     out_dir.mkdir(parents=True, exist_ok=True)

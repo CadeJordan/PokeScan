@@ -3,12 +3,11 @@ and moving the key out of `probe.card_groups` didn't change any group."""
 
 from __future__ import annotations
 
-import sqlite3
-
 import numpy as np
 import pytest
 
 from backend.app.core.config import get_settings
+from ml.data.db import connect
 from ml.data.groups import card_group_key, group_bucket
 from ml.training.probe import card_groups
 
@@ -43,11 +42,8 @@ def test_card_groups_unchanged_on_real_db():
     s = get_settings()
     if not s.db_path.exists():
         pytest.skip("no DB")
-    conn = sqlite3.connect(f"file:{s.db_path.resolve().as_posix()}?mode=ro", uri=True)
-    try:
+    with connect(s.db_path, read_only=True) as conn:
         rows = conn.execute("SELECT brand_title, subject, card_number FROM certs").fetchall()
-    finally:
-        conn.close()
     assert rows
     # As train_probe calls it.
     cols = [[v or "" for v in col] for col in zip(*rows, strict=True)]

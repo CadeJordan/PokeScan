@@ -513,13 +513,12 @@ def test_stored_precrops_are_reproduced_byte_identical():
     (false) quad and change the crop. Reads only: the DB is opened read-only
     and nothing is written.
     """
-    import sqlite3
+    from ml.data.db import connect
 
     s = get_settings()
     if not s.db_path.exists():
         pytest.skip("no DB")
-    conn = sqlite3.connect(f"file:{s.db_path.resolve().as_posix()}?mode=ro", uri=True)
-    try:
+    with connect(s.db_path, read_only=True) as conn:
         rows = conn.execute(
             "SELECT front_path, cropped_front_path, back_path, cropped_back_path FROM certs "
             "WHERE split='test' AND has_images=1 AND cropped_front_path IS NOT NULL "
@@ -531,8 +530,6 @@ def test_stored_precrops_are_reproduced_byte_identical():
             "WHERE has_images=1 AND (crop_found_front=0 OR crop_found_back=0) "
             "ORDER BY cert_number"
         ).fetchall()
-    finally:
-        conn.close()
     faces = [
         (s.data_dir / raw, s.data_dir / crop)
         for fp, fc, bp, bc in rows

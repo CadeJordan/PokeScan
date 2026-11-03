@@ -388,7 +388,7 @@ def _crop_kinds_by_cert(certs: list[str]) -> dict[str, str]:
     if not certs:
         return {}
     out: dict[str, str] = {}
-    with connect(get_settings().db_path) as conn:
+    with connect(get_settings().db_path, read_only=True) as conn:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(certs)")}
         if not {"crop_kind_front", "crop_kind_back"} <= cols:
             return {}

@@ -586,22 +586,18 @@ def test_served_features_match_training_cache(real_extractor):
 
 @pytest.mark.model
 def test_real_service_on_raw_images_sane_and_deterministic():
-    import sqlite3
-
     from backend.app.core.config import get_settings
+    from ml.data.db import connect
 
     s = get_settings()
     if not (s.grade_head_path.exists() and s.feature_model_path.exists() and s.db_path.exists()):
         pytest.skip("probe model or DB missing")
-    conn = sqlite3.connect(f"file:{s.db_path}?mode=ro", uri=True)
-    try:
+    with connect(s.db_path, read_only=True) as conn:
         rows = conn.execute(
             "SELECT grade_int, front_path, back_path FROM certs WHERE split='test' "
             "AND has_images=1 AND front_path IS NOT NULL AND back_path IS NOT NULL "
             "AND crop_found_front=1 AND crop_found_back=1 ORDER BY cert_number LIMIT 200"
         ).fetchall()
-    finally:
-        conn.close()
     rows = [r for r in rows if (s.data_dir / r[1]).exists() and (s.data_dir / r[2]).exists()]
     if not rows:
         pytest.skip("raw images missing")

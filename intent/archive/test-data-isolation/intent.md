@@ -1,5 +1,7 @@
 # Test data isolation
 
+Superseded by [[data-safety]] (2026-11-02).
+
 ## Intent
 
 The test suite can never modify real data: `data/pokescan.sqlite`, `data/images/`, `data/crops/` or `data/models/`. Tests that need real data only read it, and that is enforced, not just a convention.

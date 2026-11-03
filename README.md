@@ -216,7 +216,7 @@ histogram, the number of test certs that share a card with train/val (the
 
 Changing existing assignments needs `--reassign`, a destructive step that
 resets every test number: only with the owner's approval and after a DB
-backup. `--mode stratified --reassign` is the old per-grade shuffle
+backup (taken automatically, see below). `--mode stratified --reassign` is the old per-grade shuffle
 (`--ebay-split stratify` works only there). `--mode grouped --reassign` is the
 one-time re-split (phase 2 of `intent/archive/stable-grouped-split`, run on 2026-10-27,
 `docs/adr/0002-card-grouped-test-split.md`): every PSA cert is re-placed by its
@@ -225,6 +225,20 @@ state; since then the default sticky mode keeps it.
 The first reassign copies the old split into `split_legacy` (NULL for certs
 that had none); later reassigns leave that column alone, so the old numbers stay
 reproducible.
+
+**Automatic DB backups.** Every `split` run except `--dry-run`, and every
+`precrop` run, first snapshots the DB (`sqlite3` online backup, consistent even
+while a collector is writing) to
+`data/backups/auto/pokescan-<UTC time>-<command>.sqlite` and keeps the newest 5
+there; nothing else in `data/backups/` is ever pruned. If the snapshot fails the
+command stops before writing anything. `--no-backup` skips it. To roll back,
+stop any DB writer and copy the snapshot over `data/pokescan.sqlite`.
+Runs that change nothing still take a snapshot, so five of them push out an
+older one: copy a snapshot you want to keep (e.g. the one taken before a
+`--reassign`) out of `auto/`. With no DB at the configured path, both commands
+now stop with an error instead of creating an empty DB.
+`load_records` and `ml.eval` open the DB read-only (`connect(..., read_only=True)`),
+so evaluating never migrates or writes it.
 
 ### PSA (high-fidelity validation sample)
 
