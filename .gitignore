@@ -31,7 +31,6 @@ lightning_logs/
 
 frontend/node_modules/
 frontend/.next/
-frontend/.wrangler/
 frontend/out/
 
 .DS_Store

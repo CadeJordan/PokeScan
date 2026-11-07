@@ -1,47 +1,33 @@
-# OpenNext Starter
+# PokeScan frontend
 
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
-
-## Getting Started
-
-Read the documentation at https://opennext.js.org/cloudflare.
+Next.js 16 (App Router) + React Query + Tailwind v4. A single page that uploads a card's front and back photos to the PokeScan API and shows the predicted PSA grade. It's Next 16, which breaks older APIs: read `AGENTS.md` before changing Next code.
 
 ## Develop
 
-Run the Next.js development server:
-
-```bash
-npm run dev
-# or similar package manager command
+```powershell
+copy .env.example .env.local   # NEXT_PUBLIC_API_BASE, including /api
+npm install
+npm run dev                    # http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Run the API from `PokeScan/` (see the root `README.md`) with `CORS_ORIGINS` allowing `http://localhost:3000` (the default).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Checks
 
-## Preview
-
-Preview the application locally on the Cloudflare runtime:
-
-```bash
-npm run preview
-# or similar package manager command
+```powershell
+npm run lint
+npx tsc --noEmit
+npm test        # node --test on src/**/*.test.ts (plain-TS modules only)
+npm run build
 ```
+
+CI runs the same four (`.github/workflows/ci.yml`).
+
+## How it talks to the API
+
+- `src/app/api-client.ts` calls `${NEXT_PUBLIC_API_BASE}/health` and `/grade` from the browser, and mirrors the API's `GradeResponse` schema: keep the two in sync.
+- **Access code.** When the API has `ACCESS_CODE` set, `/grade` answers 401 without the right `X-Access-Code` header. The page then asks for the code inline, keeps it in `localStorage` and retries the grade once; a refused code shows "That code didn't work" and is forgotten (`src/lib/accessCode.ts`).
 
 ## Deploy
 
-Deploy the application to Cloudflare:
-
-```bash
-npm run deploy
-# or similar package manager command
-```
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Vercel (Hobby), importing the repo with **Root Directory** `frontend` and `NEXT_PUBLIC_API_BASE=<Cloud Run URL>/api`. Step by step: [`docs/deploy.md`](../docs/deploy.md).

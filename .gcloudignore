@@ -1,0 +1,23 @@
+# What `gcloud run deploy --source .` uploads to Cloud Build. Without this file
+# gcloud would fall back to .gitignore, which drops the (gitignored) model
+# files. Same allow-list as .dockerignore, in gitignore syntax: a file can only
+# be re-included if its parent directory is, so each level is opened in turn.
+/*
+!/Dockerfile
+!/backend/
+/backend/tests/
+!/deploy/
+/deploy/*
+!/deploy/requirements-serve.txt
+!/data/
+/data/*
+!/data/models/
+/data/models/*
+!/data/models/card_features.onnx
+!/data/models/card_features.json
+!/data/models/grade_head.npz
+!/data/models/grade_head.json
+!/data/models/face_guard.npz
+!/data/models/face_guard.json
+__pycache__/
+*.pyc

@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     cors_origins: str = "http://localhost:3000"
+    # Optional regex of extra allowed origins (e.g. Vercel preview URLs:
+    # `https://pokescan[-a-z0-9]*\.vercel\.app`), matched against the whole
+    # origin. Empty means only the exact `cors_origins` list.
+    cors_origin_regex: str = ""
+    # Optional shared code: when set, /api/grade needs it in the `X-Access-Code`
+    # header (401 otherwise). Empty means open, as before (local dev, tests).
+    access_code: str = ""
 
     @property
     def cors_origins_list(self) -> list[str]:

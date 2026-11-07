@@ -1,0 +1,16 @@
+# Allow-list: the image needs only the backend code, the serving requirements
+# and the six model files. Never data/images, crops, the DB, backups, .env,
+# frontend/ or .git. Keep .gcloudignore in step with this file.
+*
+!Dockerfile
+!deploy/requirements-serve.txt
+!backend/
+backend/tests/
+**/__pycache__/
+**/*.pyc
+!data/models/card_features.onnx
+!data/models/card_features.json
+!data/models/grade_head.npz
+!data/models/grade_head.json
+!data/models/face_guard.npz
+!data/models/face_guard.json
