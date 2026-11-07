@@ -1,4 +1,4 @@
-// The shared access code (intent/cloud-run-deploy). When the API has ACCESS_CODE
+// The shared access code (intent/archive/cloud-run-deploy). When the API has ACCESS_CODE
 // set, /grade answers 401 without the right `X-Access-Code` header; the page then
 // asks for the code, keeps it in localStorage and retries the grade once.
 //

@@ -9,7 +9,7 @@ This takes you from nothing to a working site that you and a few friends can use
 
 Every command is for **Windows PowerShell**, run from `C:\Users\User\dev\poke-scan\PokeScan` (the folder with the `Dockerfile`) unless it says otherwise. Anything in `<angle brackets>` is yours to fill in. A backtick (`` ` ``) at the end of a line continues the command on the next line, so copy the whole block.
 
-The short owner checklist is `intent/cloud-run-deploy/owner-steps.md`; this guide is the full version.
+The short owner checklist is `intent/archive/cloud-run-deploy/owner-steps.md`; this guide is the full version.
 
 ---
 
@@ -103,7 +103,7 @@ What each part does:
 |---|---|
 | `--source .` | Uploads the folder (filtered by `.gcloudignore`: backend code, requirements, `Dockerfile`, the six model files, about 350 MB) and has Cloud Build build the `Dockerfile`. The first run takes several minutes. |
 | `--region us-central1` | A free-tier region. |
-| `--cpu 2 --memory 2Gi` | 2 vCPUs and 2 GiB. Measured in a local container with the same limits: peak memory 1.46–1.51 GiB under 4 simultaneous grades, about 7 s per grade (see `intent/cloud-run-deploy/intent.md`, Results). |
+| `--cpu 2 --memory 2Gi` | 2 vCPUs and 2 GiB. Measured in a local container with the same limits: peak memory 1.46–1.51 GiB under 4 simultaneous grades, about 7 s per grade (see `intent/archive/cloud-run-deploy/intent.md`, Results). |
 | `--min-instances 0` | Scales to zero when idle, so idle time costs nothing. The first request after idling waits for a cold start. |
 | `--max-instances 1` | **The cost cap.** Never more than one instance. |
 | `--cpu-boost` | Extra CPU while the instance starts, so the model loads faster on a cold start. |

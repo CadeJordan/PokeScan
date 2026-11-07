@@ -1,4 +1,4 @@
-"""Data safety (intent/data-safety): automatic DB backups, read-only readers and
+"""Data safety (intent/archive/data-safety): automatic DB backups, read-only readers and
 the session guard in the root conftest. Everything here runs on `tmp_path`."""
 
 from __future__ import annotations

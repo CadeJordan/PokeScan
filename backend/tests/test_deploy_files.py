@@ -1,4 +1,4 @@
-"""Container build inputs (intent/cloud-run-deploy): the Dockerfile, the serving
+"""Container build inputs (intent/archive/cloud-run-deploy): the Dockerfile, the serving
 requirements and the two allow-list ignore files stay in step.
 
 `.dockerignore` (local `docker build`) and `.gcloudignore` (`gcloud run deploy

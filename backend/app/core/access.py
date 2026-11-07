@@ -1,11 +1,11 @@
-"""Shared access code for /api/grade (`settings.access_code`, intent/cloud-run-deploy).
+"""Shared access code for /api/grade (`settings.access_code`, intent/archive/cloud-run-deploy).
 
 A plain ASGI middleware rather than a route dependency: FastAPI parses the
 multipart body before it resolves dependencies, and a missing or wrong code
 must be refused before the upload is read or a grading slot is taken.
 
 It also limits wrong codes per client IP (`settings.code_attempts_per_minute`,
-intent/rate-limits-and-photo-picker): each missing or wrong code counts as one
+intent/archive/rate-limits-and-photo-picker): each missing or wrong code counts as one
 failure, and an IP at the limit gets a 429 for every protected request, even
 with the right code, until its oldest failure leaves the window.
 """
