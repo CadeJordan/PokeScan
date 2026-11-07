@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.api.grade import router as grade_router
+from backend.app.core.access import AccessCodeMiddleware
 from backend.app.core.config import get_settings
 from backend.app.ml.inference import get_inference_service
 
@@ -36,9 +37,16 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=_lifespan,
     )
+    # Stripped: a stray space or newline in the env var would otherwise lock
+    # everyone out (header values arrive trimmed); blank means no code.
+    access_code = settings.access_code.strip()
+    if access_code:
+        # Added before CORS, so CORS stays outermost and the 401 carries its headers.
+        app.add_middleware(AccessCodeMiddleware, code=access_code)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list or ["*"],
+        allow_origin_regex=settings.cors_origin_regex or None,
         allow_methods=["GET", "POST"],
         allow_headers=["*"],
         # A browser client can read when to retry a 503 "server busy".

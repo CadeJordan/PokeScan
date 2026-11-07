@@ -5,18 +5,38 @@ import { useMutation } from "@tanstack/react-query";
 import ImageDropzone from "./ImageDropzone";
 import GradeResult from "./GradeResult";
 import { gradeCard, type GradeResponse } from "@/app/api-client";
+import {
+  browserStorage,
+  isValidCode,
+  WRONG_CODE_MESSAGE,
+  withAccessCode,
+  type AccessOutcome,
+} from "@/lib/accessCode";
 
 const Uploader = () => {
   const [front, setFront] = useState<File | null>(null);
   const [back, setBack] = useState<File | null>(null);
+  // Shown when the API wants an access code (401); `wrong` after a refused one.
+  const [codePrompt, setCodePrompt] = useState<{ wrong: boolean } | null>(null);
+  const [codeInput, setCodeInput] = useState("");
 
   const mutation = useMutation<
-    GradeResponse,
+    AccessOutcome<GradeResponse>,
     Error,
-    { front: File; back: File }
+    { front: File; back: File; code?: string }
   >({
-    mutationFn: ({ front, back }) => gradeCard(front, back),
+    mutationFn: ({ front, back, code }) =>
+      withAccessCode((c) => gradeCard(front, back, c), browserStorage(), code),
+    onSuccess: (outcome) => {
+      if (outcome.kind === "needs-code") {
+        setCodePrompt({ wrong: outcome.wrongCode });
+        setCodeInput("");
+      } else {
+        setCodePrompt(null);
+      }
+    },
   });
+  const result = mutation.data?.kind === "ok" ? mutation.data.value : null;
 
   const ready = front !== null && back !== null;
   const canSubmit = ready && !mutation.isPending;
@@ -24,7 +44,20 @@ const Uploader = () => {
   const reset = () => {
     setFront(null);
     setBack(null);
+    setCodePrompt(null);
     mutation.reset();
+  };
+
+  const submitCode = () => {
+    const code = codeInput.trim();
+    if (!code) return;
+    if (!isValidCode(code)) {
+      // Can't be the code (the guide allows letters, digits and hyphens).
+      setCodePrompt({ wrong: true });
+      setCodeInput("");
+      return;
+    }
+    if (front && back) mutation.mutate({ front, back, code });
   };
 
   return (
@@ -76,6 +109,44 @@ const Uploader = () => {
         </div>
       </div>
 
+      {codePrompt && (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            submitCode();
+          }}
+          className="flex flex-col gap-3 border border-amber-400/20 bg-amber-400/[0.06] px-4 py-3 text-sm"
+        >
+          <label htmlFor="access-code" className="flex flex-col gap-0.5">
+            <span className="font-medium text-amber-100">
+              {codePrompt.wrong ? WRONG_CODE_MESSAGE : "This site needs an access code"}
+            </span>
+            <span className="text-amber-200/70">
+              {codePrompt.wrong
+                ? "Check it and try again."
+                : "Ask whoever shared PokeScan with you. It's remembered on this device."}
+            </span>
+          </label>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <input
+              id="access-code"
+              type="password"
+              autoComplete="off"
+              value={codeInput}
+              onChange={(e) => setCodeInput(e.target.value)}
+              className="min-w-0 flex-1 rounded-md border border-white/[0.08] bg-zinc-950 px-3 py-2 text-zinc-100 outline-none focus:border-white/30"
+            />
+            <button
+              type="submit"
+              disabled={!ready || !codeInput.trim() || mutation.isPending}
+              className="inline-flex items-center justify-center rounded-md bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-950 transition hover:bg-white disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
+            >
+              Unlock and grade
+            </button>
+          </div>
+        </form>
+      )}
+
       {mutation.isError && (
         <div className="flex items-start gap-3 border border-rose-400/20 bg-rose-400/[0.06] px-4 py-3 text-sm">
           <span className="mt-1.5 inline-block h-1.5 w-1.5 rounded-full bg-rose-400" />
@@ -88,9 +159,9 @@ const Uploader = () => {
         </div>
       )}
 
-      {mutation.data && (
+      {result && (
         <div className="animate-grade-rise">
-          <GradeResult result={mutation.data} />
+          <GradeResult result={result} />
         </div>
       )}
     </section>

@@ -45,7 +45,9 @@ PokeScan/
     data/               PSA / eBay collectors, SQLite, split, precrop
     training/           Probe head and face guard training (feature graph export to ONNX)
     eval/               End-to-end evaluation of the served pipeline
-  frontend/             Next.js app (upload UI, grade display)
+  frontend/             Next.js app (upload UI, grade display), deployed on Vercel
+  deploy/               Serving-only requirements for the API container
+  Dockerfile            API image for Cloud Run (docs/deploy.md)
   data/                 Local images, SQLite, model artifacts (gitignored by default)
   pyproject.toml
   .env                  Secrets and paths (copy from .env.example)
@@ -96,7 +98,9 @@ Edit `.env` with your credentials and paths:
 | `EBAY_APP_ID`, `EBAY_CERT_ID` | eBay Browse API (primary bulk training source). |
 | `DATA_DIR`, `IMAGES_DIR`, `DB_PATH` | Where harvested images and SQLite metadata live. |
 | `GRADE_HEAD_PATH`, `FEATURE_MODEL_PATH` | Probe model files loaded by the API (defaults `data/models/grade_head.npz`, `data/models/card_features.onnx`); a `face_guard.npz` next to the head is loaded too. |
-| `CORS_ORIGINS` | Frontend origin(s), default `http://localhost:3000`. |
+| `CORS_ORIGINS` | Frontend origin(s), comma-separated exact matches, default `http://localhost:3000`. |
+| `CORS_ORIGIN_REGEX` | Optional regex of extra allowed origins, matched against the whole origin (e.g. Vercel previews: `https://pokescan[-a-z0-9]*\.vercel\.app`). Unset: `CORS_ORIGINS` only. |
+| `ACCESS_CODE` | Optional shared code. When set, `/api/grade` needs it in the `X-Access-Code` header and answers 401 `"access code required"` without it (before reading the upload); `/api/health` stays open. Unset: no code, as before. |
 
 **PSA token:** https://www.psacard.com/publicapi/documentation  
 **eBay keys:** https://developer.ebay.com/my/keys (Production App ID + Cert ID)
@@ -431,6 +435,10 @@ ruff check .
 pytest
 ```
 
+## Deploy
+
+The API runs as a container on Google Cloud Run (scales to zero, at most one instance) and the frontend on Vercel's Hobby plan, with `ACCESS_CODE` as a shared lock. Step-by-step PowerShell guide, costs and teardown: [`docs/deploy.md`](docs/deploy.md).
+
 ## API reference
 
 | Method | Path | Description |
@@ -442,6 +450,7 @@ pytest
 
 | Status | When |
 |---|---|
+| 401 | `ACCESS_CODE` is set and the `X-Access-Code` header is missing or wrong (`"access code required"`), checked before anything else |
 | 400 | Empty upload, or not a readable image (corrupt, truncated, not an image, or not a JPEG, PNG or WebP whatever its declared content type). Once a photo opens, a malformed EXIF block is ignored: the photo is graded with its orientation applied if that can be read, else as upright. Rarely, a JPEG whose EXIF makes the image library fail to open it (e.g. a one-value XResolution) is refused as unreadable |
 | 413 | Image over 12 MB |
 | 415 | Content type isn't JPEG, PNG or WebP |
