@@ -101,6 +101,9 @@ Edit `.env` with your credentials and paths:
 | `CORS_ORIGINS` | Frontend origin(s), comma-separated exact matches, default `http://localhost:3000`. |
 | `CORS_ORIGIN_REGEX` | Optional regex of extra allowed origins, matched against the whole origin (e.g. Vercel previews: `https://pokescan[-a-z0-9]*\.vercel\.app`). Unset: `CORS_ORIGINS` only. |
 | `ACCESS_CODE` | Optional shared code. When set, `/api/grade` needs it in the `X-Access-Code` header and answers 401 `"access code required"` without it (before reading the upload); `/api/health` stays open. Unset: no code, as before. |
+| `CODE_ATTEMPTS_PER_MINUTE` | Missing or wrong access codes allowed per client IP per minute (default 5; only with `ACCESS_CODE`; `0` = off). Past it, every `/api/grade` request from that IP is a 429 `"too many attempts, wait a minute"`, even with the right code, until the window clears. |
+| `GRADES_PER_HOUR` | Grades per client IP per hour (default `0` = off; the Cloud Run deploy sets 30). Only requests that reach a grading slot count (an unreadable photo does, a refused upload or "server busy" doesn't). IPv6 clients are counted per /64. Over it: 429 `"grade limit reached (N per hour), try again later"`. |
+| `TRUST_FORWARDED_FOR` | Take the client IP for those limits from the right-most `X-Forwarded-For` entry (default `false`: the TCP peer; the header is ignored). Set `true` only behind a proxy that appends it (Cloud Run). |
 
 **PSA token:** https://www.psacard.com/publicapi/documentation  
 **eBay keys:** https://developer.ebay.com/my/keys (Production App ID + Cert ID)
@@ -437,7 +440,7 @@ pytest
 
 ## Deploy
 
-The API runs as a container on Google Cloud Run (scales to zero, at most one instance) and the frontend on Vercel's Hobby plan, with `ACCESS_CODE` as a shared lock. Step-by-step PowerShell guide, costs and teardown: [`docs/deploy.md`](docs/deploy.md).
+The API runs as a container on Google Cloud Run (scales to zero, at most one instance) and the frontend on Vercel's Hobby plan, with `ACCESS_CODE` as a shared lock and per-IP rate limits. Step-by-step PowerShell guide, costs and teardown: [`docs/deploy.md`](docs/deploy.md).
 
 ## API reference
 
@@ -451,6 +454,7 @@ The API runs as a container on Google Cloud Run (scales to zero, at most one ins
 | Status | When |
 |---|---|
 | 401 | `ACCESS_CODE` is set and the `X-Access-Code` header is missing or wrong (`"access code required"`), checked before anything else |
+| 429 | Rate limited, before the upload is read, with `Retry-After` (seconds): too many missing/wrong codes from this IP in the last minute (`"too many attempts, wait a minute"`, even with the right code), or this IP's `GRADES_PER_HOUR` used up (`"grade limit reached (30 per hour), try again later"`) |
 | 400 | Empty upload, or not a readable image (corrupt, truncated, not an image, or not a JPEG, PNG or WebP whatever its declared content type). Once a photo opens, a malformed EXIF block is ignored: the photo is graded with its orientation applied if that can be read, else as upright. Rarely, a JPEG whose EXIF makes the image library fail to open it (e.g. a one-value XResolution) is refused as unreadable |
 | 413 | Image over 12 MB |
 | 415 | Content type isn't JPEG, PNG or WebP |

@@ -8,11 +8,12 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 import anyio
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from backend.app.core.config import get_settings
+from backend.app.core.rate_limit import grade_ticket
 from backend.app.ml.inference import (
     GradeInferenceService,
     GradePrediction,
@@ -133,6 +134,7 @@ async def _read_image(upload: UploadFile, label: str) -> bytes:
 
 @router.post("/grade", response_model=GradeResponse)
 async def grade_card(
+    request: Request,
     front: Annotated[UploadFile, File(description="Card front image (JPEG/PNG/WebP).")],
     back: Annotated[UploadFile, File(description="Card back image (JPEG/PNG/WebP).")],
 ) -> GradeResponse:
@@ -149,7 +151,14 @@ async def grade_card(
     # Model inference and the centering sub-grade are seconds of CPU work; run them
     # off the event loop so other requests (e.g. /health) aren't blocked, and
     # under one grading token so concurrent uploads queue instead of piling up.
+    # The per-IP grade limit (`core/rate_limit.py`, when on) keeps its
+    # reservation only for a request that gets a slot: refusals above
+    # (413/415/400) and a 503 cost the client nothing. An unreadable image
+    # counts, since it held a slot while the other face was decoded.
+    ticket = grade_ticket(request.scope)
     async with _grading_slot():
+        if ticket is not None:
+            ticket.count()
         pred, sub, notes = await _grade(service, front_bytes, back_bytes)
 
     for name in ("corners", "edges", "surface"):

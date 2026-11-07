@@ -80,6 +80,35 @@ The exact commands are in `docs/deploy.md`. In outline:
 5. **Try it.** Open the Vercel site, enter the access code, and grade a real card pair.
 6. **Share** the Vercel link and the access code with your friends.
 
+## After the rate-limit PR merges
+
+That PR (`intent/rate-limits-and-photo-picker`) changes the API, so the API needs a redeploy; Vercel redeploys the frontend by itself when the PR lands on `main`. In PowerShell:
+
+1. **Get the merged code:**
+   ```powershell
+   cd C:\Users\User\dev\poke-scan\PokeScan
+   git checkout main
+   git pull
+   ```
+2. **Redeploy the API and turn the limits on** (several minutes, like the first deploy):
+   ```powershell
+   gcloud run deploy pokescan-api --source . --region us-central1 --update-env-vars "TRUST_FORWARDED_FOR=true,GRADES_PER_HOUR=30"
+   ```
+   - Use exactly this, **not** the first-time command with `--set-env-vars`: that one replaces every variable and would wipe the `CORS_ORIGINS` / `CORS_ORIGIN_REGEX` you set for `https://pkmn-scan.vercel.app`, so the site would stop reaching the API.
+   - `--update-env-vars` adds these two and keeps everything else as it is: `ACCESS_CODE`, the CORS values, `GRADE_CONCURRENCY=2`, and the CPU, memory and max-instances settings.
+   - The wrong-code limit (5 a minute) needs no variable: it's on by default whenever `ACCESS_CODE` is set.
+   - To double-check afterwards: `gcloud run services describe pokescan-api --region us-central1 --format "value(spec.template.spec.containers[0].env)"` lists all the variables.
+3. **Check the forged-IP trick doesn't work.** Wait a minute after the deploy finishes, then:
+   ```powershell
+   $API = gcloud run services describe pokescan-api --region us-central1 --format "value(status.url)"
+   1..6 | ForEach-Object { curl.exe -s -o NUL -w "%{http_code}`n" -X POST -H "X-Access-Code: wrong-$_" -H "X-Forwarded-For: 198.51.100.$_" "$API/api/grade" }
+   ```
+   You should see `401` five times, then **`429`**. If the 6th is `401`, the limits can be dodged: tell me before relying on them. Your PC is locked out for a minute after this (even with the right code).
+4. **Check it's per visitor:** within that minute, open https://pkmn-scan.vercel.app on your phone **on mobile data, not Wi-Fi**, and grade a pair. It should work. If it says "too many attempts, wait a minute", tell me.
+5. **Try the photo picker:** on your iPhone, tap an upload box. It should offer the photo library as well as the camera. Pick a photo you already took and grade it. The browser tab now reads just "PokeScan".
+
+The full explanation is in `docs/deploy.md` (step 2.2 table, step 3.1).
+
 ## Later
 
 - **After retraining the model,** re-run the deploy command so the API gets the new model. The frontend redeploys by itself on every push to `main`.

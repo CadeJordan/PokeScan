@@ -1,4 +1,4 @@
-import { AccessCodeError, accessCodeHeaders } from "@/lib/accessCode";
+import { accessCodeHeaders, gradeError } from "@/lib/accessCode";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000/api";
@@ -46,7 +46,8 @@ export async function getHealth(): Promise<HealthResponse> {
 }
 
 // Throws AccessCodeError on a 401 (the API's ACCESS_CODE is set and `accessCode`
-// is missing or wrong); any other failure is an Error with the API's detail.
+// is missing or wrong); any other failure (e.g. a 429 rate limit) is an Error
+// with the API's detail (`gradeError`).
 export async function gradeCard(
   front: File,
   back: File,
@@ -65,8 +66,7 @@ export async function gradeCard(
       .json()
       .then((b) => (b as { detail?: string }).detail)
       .catch(() => undefined);
-    if (res.status === 401) throw new AccessCodeError(detail);
-    throw new Error(detail ?? `grade request failed (${res.status})`);
+    throw gradeError(res.status, detail);
   }
   return res.json();
 }

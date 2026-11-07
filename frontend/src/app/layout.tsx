@@ -14,7 +14,7 @@ const inter = localFont({
 });
 
 export const metadata: Metadata = {
-	title: "PokeScan — predict your PSA grade",
+	title: "PokeScan",
 	description:
 		"Upload a photo of your Pokemon card and get a predicted PSA grade with its confidence.",
 };

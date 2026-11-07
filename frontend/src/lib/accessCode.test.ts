@@ -6,6 +6,7 @@ import {
   AccessCodeError,
   accessCodeHeaders,
   clearCode,
+  gradeError,
   isValidCode,
   loadCode,
   saveCode,
@@ -158,6 +159,53 @@ test("other errors are not taken for a missing code", async () => {
     /server busy/,
   );
   // The stored code is kept: only a 401 clears it.
+  assert.equal(items.get(ACCESS_CODE_STORAGE_KEY), "right");
+});
+
+test("gradeError: a 401 is a code error, a 429 is a plain error with the detail", () => {
+  const unauthorized = gradeError(401, "access code required");
+  assert.ok(unauthorized instanceof AccessCodeError);
+  assert.equal(unauthorized.message, "access code required");
+
+  for (const detail of [
+    "too many attempts, wait a minute",
+    "grade limit reached (30 per hour), try again later",
+  ]) {
+    const limited = gradeError(429, detail);
+    assert.equal(limited instanceof AccessCodeError, false);
+    assert.equal(limited.message, detail);
+  }
+  assert.equal(gradeError(429, undefined).message, "grade request failed (429)");
+  assert.equal(gradeError(503, "server busy, try again").message, "server busy, try again");
+});
+
+for (const detail of [
+  "too many attempts, wait a minute",
+  "grade limit reached (30 per hour), try again later",
+]) {
+  test(`a 429 (${detail}) keeps the stored code and doesn't ask for one`, async () => {
+    const { storage, items } = memoryStorage({ [ACCESS_CODE_STORAGE_KEY]: "right" });
+    const calls: (string | null)[] = [];
+    await assert.rejects(
+      withAccessCode(async (code) => {
+        calls.push(code);
+        throw gradeError(429, detail);
+      }, storage),
+      (err: unknown) => err instanceof Error && !(err instanceof AccessCodeError) && err.message === detail,
+    );
+    assert.deepEqual(calls, ["right"]);
+    assert.equal(items.get(ACCESS_CODE_STORAGE_KEY), "right");
+  });
+}
+
+test("a 429 on a just-entered code keeps that code", async () => {
+  const { storage, items } = memoryStorage();
+  await assert.rejects(
+    withAccessCode(async () => {
+      throw gradeError(429, "too many attempts, wait a minute");
+    }, storage, "right"),
+    /too many attempts/,
+  );
   assert.equal(items.get(ACCESS_CODE_STORAGE_KEY), "right");
 });
 

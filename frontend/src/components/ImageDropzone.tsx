@@ -125,7 +125,6 @@ const ImageDropzone = ({
           ref={inputRef}
           type="file"
           accept={accept}
-          capture="environment"
           className="hidden"
           onChange={(e) => acceptFile(e.target.files?.[0])}
         />
