@@ -5,6 +5,7 @@ This takes you from nothing to a working site that you and a few friends can use
 - **The API** (FastAPI + the probe model) runs as a container on **Google Cloud Run**. It scales to zero when idle and never runs more than one instance.
 - **The frontend** (Next.js) runs on **Vercel**'s free Hobby plan. Browsers call the API directly.
 - **A shared access code** (`ACCESS_CODE`) keeps strangers who find the URL from grading cards. The site asks for it once and remembers it.
+- **Per-IP rate limits** make guessing the code impractical (5 wrong codes a minute) and stop one visitor from tying up the instance (30 grades an hour).
 
 Every command is for **Windows PowerShell**, run from `C:\Users\User\dev\poke-scan\PokeScan` (the folder with the `Dockerfile`) unless it says otherwise. Anything in `<angle brackets>` is yours to fill in. A backtick (`` ` ``) at the end of a line continues the command on the next line, so copy the whole block.
 
@@ -88,7 +89,12 @@ gcloud run deploy pokescan-api `
   --cpu-boost `
   --timeout 60 `
   --allow-unauthenticated `
-  --set-env-vars "GRADE_CONCURRENCY=2,CORS_ORIGINS=http://localhost:3000,CORS_ORIGIN_REGEX=https://pokescan[-a-z0-9]*\.vercel\.app,ACCESS_CODE=$CODE"
+  --set-env-vars "GRADE_CONCURRENCY=2,CORS_ORIGINS=http://localhost:3000,CORS_ORIGIN_REGEX=https://pokescan[-a-z0-9]*\.vercel\.app,ACCESS_CODE=$CODE,TRUST_FORWARDED_FOR=true,GRADES_PER_HOUR=30"
+```
+
+**Already deployed** (the service exists and you've set CORS in step 4.3)? Don't re-run the command above: `--set-env-vars` replaces **every** variable, which would reset your CORS values. Redeploy with `--update-env-vars`, which changes only the variables it names and keeps the rest (`ACCESS_CODE`, `CORS_ORIGINS`, `CORS_ORIGIN_REGEX`, `GRADE_CONCURRENCY`) and the CPU, memory and instance settings:
+```powershell
+gcloud run deploy pokescan-api --source . --region us-central1 --update-env-vars "TRUST_FORWARDED_FOR=true,GRADES_PER_HOUR=30"
 ```
 
 What each part does:
@@ -107,6 +113,13 @@ What each part does:
 | `CORS_ORIGINS` | Exact browser origins allowed to call the API. `http://localhost:3000` for now; you'll set the Vercel URL in step 4.3. |
 | `CORS_ORIGIN_REGEX` | Extra origins as a pattern, for Vercel's preview deployments (each gets a new URL). It must match the whole origin. You'll tighten it in step 4.3. |
 | `ACCESS_CODE` | The shared code. `/api/grade` answers 401 without it. |
+| `TRUST_FORWARDED_FOR=true` | Count rate limits per visitor IP. Behind Cloud Run the connection comes from Google's front end, which puts the visitor's IP at the right-most end of the `X-Forwarded-For` header; the API trusts only that entry (anything a client forges sits to its left). Default `false`: the TCP peer is used and the header is ignored. Turn it on only behind a proxy that appends the header, and run the check in step 3.1. |
+| `GRADES_PER_HOUR=30` | At most 30 grades per IP in any hour; the 31st gets 429 "grade limit reached (30 per hour), try again later" with `Retry-After`. Only requests that reach the model count: a refused upload (too large, wrong format, empty), a wrong code or a "server busy" doesn't; an unreadable photo does, since it held a grading slot. IPv6 visitors are counted per /64 (one connection's block of addresses) for both limits. Default `0` = no limit. |
+| `CODE_ATTEMPTS_PER_MINUTE` (not set: default `5`) | Missing or wrong access codes per IP per minute. Past it, every `/api/grade` request from that IP gets 429 "too many attempts, wait a minute" with `Retry-After`, **even with the right code**, until its oldest failure is a minute old. A first visit uses 1 (the page tries once without a code). Only applies with `ACCESS_CODE` set; `0` turns it off. |
+
+The rate limits are counted in the instance's memory: they reset when it restarts (e.g. after scaling to zero), and they're exact because there's only ever one instance with one worker. `/api/health` is never limited.
+
+> **Shared IPs.** Everyone behind the same public IP (friends on the same Wi-Fi, a phone carrier's NAT) shares one set of limits: one person typing the code wrong 5 times locks the others out for a minute, and together they get 30 grades an hour. Fine for a few friends; raise `GRADES_PER_HOUR` with `--update-env-vars` if it bites.
 
 - The first time, gcloud asks to create an Artifact Registry repository (`cloud-run-source-deploy`). Answer **Y**.
 - When it finishes it prints the **Service URL**, like `https://pokescan-api-xxxxxxxxxx-uc.a.run.app`.
@@ -118,6 +131,8 @@ What each part does:
 > CORS_ORIGINS: 'https://pokescan.vercel.app,https://pokescan-git-main-<your-scope>.vercel.app'
 > CORS_ORIGIN_REGEX: 'https://pokescan[-a-z0-9]*\.vercel\.app'
 > ACCESS_CODE: '<your-access-code>'
+> TRUST_FORWARDED_FOR: 'true'
+> GRADES_PER_HOUR: '30'
 > ```
 > With the regex covering previews, one exact origin is usually enough, so you shouldn't need this.
 
@@ -149,6 +164,17 @@ Check the lock, too. If this is a new PowerShell window, set `$CODE` again first
 curl.exe -s -o NUL -w "%{http_code}`n" -X POST "$API/api/grade"                              # 401: no code
 curl.exe -s -o NUL -w "%{http_code}`n" -X POST -H "X-Access-Code: $CODE" "$API/api/grade"     # 422: code accepted, no images sent
 ```
+
+### 3.1 Check that the rate limit can't be dodged (after every deploy that sets `TRUST_FORWARDED_FOR=true`)
+The limit relies on Google's front end *appending* your real IP to `X-Forwarded-For`, so a forged entry ends up on the left where it's ignored. Check it: send 6 wrong codes, each with a different fake `X-Forwarded-For`. **Wait a minute after the lock check above first** (its first request was a failure too), then:
+```powershell
+1..6 | ForEach-Object { curl.exe -s -o NUL -w "%{http_code}`n" -X POST -H "X-Access-Code: wrong-$_" -H "X-Forwarded-For: 198.51.100.$_" "$API/api/grade" }
+```
+- **Expected:** `401` five times, then **`429`**. The forged IPs didn't help: all six were counted against your real IP.
+- **If the 6th is `401`:** the API is trusting the forged entry, so anyone can dodge both limits. Stop relying on the limits and fix it before sharing the site: set `TRUST_FORWARDED_FOR=false` with `gcloud run services update pokescan-api --region us-central1 --update-env-vars "TRUST_FORWARDED_FOR=false"` and look into it (with it off, every visitor shares the front end's IP, so the limits are shared too).
+- Your IP is now locked out for a minute (even with the right code). Wait a minute before grading.
+
+One more check, that the limit is per visitor and not shared by everyone: while your PC is still locked out (within the minute), open the site on your phone **on mobile data, not your Wi-Fi**, and grade a pair. It should work. If it says "too many attempts, wait a minute", the API sees the same IP for every visitor; set `TRUST_FORWARDED_FOR=false` as above and look into it.
 
 ---
 
@@ -192,7 +218,7 @@ If the page says it can't reach the API, open the browser's developer tools (F12
 Docker Desktop must be running. This is what the deploy was verified with; it doesn't touch the cloud.
 ```powershell
 docker build -t pokescan-api:local .
-docker run --rm -d --name pokescan-local --memory 2g --cpus 2 -e PORT=8080 -e ACCESS_CODE=test -p 127.0.0.1:18080:8080 pokescan-api:local
+docker run --rm -d --name pokescan-local --memory 2g --cpus 2 -e PORT=8080 -e ACCESS_CODE=test -e TRUST_FORWARDED_FOR=true -e GRADES_PER_HOUR=30 -p 127.0.0.1:18080:8080 pokescan-api:local
 curl.exe http://127.0.0.1:18080/api/health
 docker stats --no-stream pokescan-local
 docker stop pokescan-local
@@ -203,10 +229,11 @@ docker stop pokescan-local
 
 ## 6. Updating
 
-- **New model** (after `train_probe` or `train_face_guard`): the model is inside the image, so run the **same `gcloud run deploy` command** from step 2.2 again. Use `--update-env-vars` instead of `--set-env-vars` (or leave the env-vars flag out) so the CORS settings from step 4.3 aren't reset.
+- **New model** (after `train_probe` or `train_face_guard`): the model is inside the image, so redeploy: `gcloud run deploy pokescan-api --source . --region us-central1` (the "already deployed" form in step 2.2, without an env-vars flag, or with `--update-env-vars` to change some). Never re-run the first-time command with `--set-env-vars`: it resets the CORS settings from step 4.3.
 - **Backend code change:** same: redeploy with `--source .`.
 - **Frontend:** Vercel redeploys by itself on every push to `main`, and builds a preview for every other branch and pull request.
 - **Change the access code:** `gcloud run services update pokescan-api --region us-central1 --update-env-vars "ACCESS_CODE=<new-code>"` (letters, digits and hyphens only). Everyone's stored code stops working; the page asks again.
+- **Change a rate limit:** e.g. `gcloud run services update pokescan-api --region us-central1 --update-env-vars "GRADES_PER_HOUR=60"` (`0` turns it off). No rebuild.
 - **Rollback:** Cloud Run keeps old revisions. In the console, **Cloud Run → pokescan-api → Revisions**, pick one and **Manage traffic** to send 100% to it.
 
 ---
@@ -237,6 +264,7 @@ gcloud artifacts docker images delete "us-central1-docker.pkg.dev/$PROJECT/cloud
 Limits worth knowing:
 - Uploads are capped at 12 MB per photo by the API, well under Cloud Run's request size limit.
 - One instance grades 2 photo pairs at once; more simultaneous requests queue, and one that waits over 30 s gets "server busy, try again". Fine for a few friends.
+- Each IP gets 30 grades an hour and 5 wrong codes a minute (step 2.2); people on one Wi-Fi share them.
 
 ---
 

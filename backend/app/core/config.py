@@ -62,6 +62,17 @@ class Settings(BaseSettings):
     # Optional shared code: when set, /api/grade needs it in the `X-Access-Code`
     # header (401 otherwise). Empty means open, as before (local dev, tests).
     access_code: str = ""
+    # Per-IP rate limits on /api/grade (`core/rate_limit.py`), in this process's
+    # memory. Wrong (or missing) access codes per minute before the IP gets 429s,
+    # even with the right code; only applies when `access_code` is set (0 = off).
+    code_attempts_per_minute: int = Field(default=5, ge=0)
+    # Grades per hour per IP (requests that reach a grading slot with a readable
+    # image); 0 = off, so local dev and tests are unlimited. The deploy sets 30.
+    grades_per_hour: int = Field(default=0, ge=0)
+    # Take the client IP from the right-most `X-Forwarded-For` entry (the one
+    # Cloud Run's front end appends) instead of the TCP peer. Only turn on
+    # behind a proxy that appends it, or clients can pick their own IP.
+    trust_forwarded_for: bool = False
 
     @property
     def cors_origins_list(self) -> list[str]:

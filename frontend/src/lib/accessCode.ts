@@ -17,6 +17,17 @@ export class AccessCodeError extends Error {
   }
 }
 
+/**
+ * The error for a failed /grade response: a 401 is an `AccessCodeError` (ask for
+ * the code); anything else, including a 429 rate limit ("too many attempts, wait
+ * a minute" or "grade limit reached ..."), is a plain `Error` with the API's
+ * detail, so it's shown as is and never taken for a wrong code.
+ */
+export function gradeError(status: number, detail: string | undefined): Error {
+  if (status === 401) return new AccessCodeError(detail);
+  return new Error(detail ?? `grade request failed (${status})`);
+}
+
 export type CodeStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 /** The browser's localStorage, or null where it's unavailable (SSR, blocked). */
