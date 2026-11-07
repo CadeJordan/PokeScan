@@ -82,7 +82,7 @@ The exact commands are in `docs/deploy.md`. In outline:
 
 ## After the rate-limit PR merges
 
-That PR (`intent/rate-limits-and-photo-picker`) changes the API, so the API needs a redeploy; Vercel redeploys the frontend by itself when the PR lands on `main`. In PowerShell:
+That PR (`intent/archive/rate-limits-and-photo-picker`) changes the API, so the API needs a redeploy; Vercel redeploys the frontend by itself when the PR lands on `main`. In PowerShell:
 
 1. **Get the merged code:**
    ```powershell

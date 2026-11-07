@@ -1,4 +1,4 @@
-"""Per-IP rate limits on /api/grade (intent/rate-limits-and-photo-picker).
+"""Per-IP rate limits on /api/grade (intent/archive/rate-limits-and-photo-picker).
 
 - `CODE_ATTEMPTS_PER_MINUTE` (default 5, only with `ACCESS_CODE`): missing or
   wrong codes per IP per minute; past it every /api/grade request from the IP is

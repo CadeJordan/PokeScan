@@ -1,4 +1,4 @@
-"""Per-IP rate limits for /api/grade (intent/rate-limits-and-photo-picker).
+"""Per-IP rate limits for /api/grade (intent/archive/rate-limits-and-photo-picker).
 
 Two limits, both in this process's memory (Cloud Run runs one instance with one
 worker, so one counter sees every request; counts reset on a restart):

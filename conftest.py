@@ -1,4 +1,4 @@
-"""Session guard: the test suite must not change real data (intent/data-safety).
+"""Session guard: the test suite must not change real data (intent/archive/data-safety).
 
 At session start it records the relative path, size and mtime of every file
 under `data/images`, `images_full`, `crops`, `models` and `backups`, plus a

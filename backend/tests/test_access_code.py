@@ -1,4 +1,4 @@
-"""Deploy settings (intent/cloud-run-deploy): `CORS_ORIGIN_REGEX` and `ACCESS_CODE`.
+"""Deploy settings (intent/archive/cloud-run-deploy): `CORS_ORIGIN_REGEX` and `ACCESS_CODE`.
 
 Both are off by default. With `ACCESS_CODE` set, /api/grade needs the
 `X-Access-Code` header and refuses a missing or wrong one with a 401 before the
